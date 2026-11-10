@@ -1,0 +1,15 @@
+{
+  "project": "Heyting Guard Synthesis & Kripke-Joyal CFG Semantics",
+  "nodes": [
+    {
+      "id": "synthesizeGuard_sound",
+      "status": "spec_locked",
+      "informal_claim": "In any Heyting algebra, a meet (a => b) <= b."
+    },
+    {
+      "id": "synthesizeGuard_weakest",
+      "status": "spec_locked",
+      "informal_claim": "By the Heyting adjunction, a meet g <= b iff g <= (a => b)."
+    }
+  ]
+}
