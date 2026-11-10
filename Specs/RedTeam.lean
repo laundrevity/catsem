@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 8 match their blueprint claims after unfolding
+The target statements through Round 9 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All thirty declarations in `Specs.Target` currently have placeholder proofs. None
+All thirty-four declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -1508,5 +1508,286 @@ theorem residual_need_not_be_weakest :
   decide
 
 end Round8
+
+/-!
+## Round 9: inter-block and loop-hoisted conditional rewrites
+
+The definition and all four statements match the blueprint. `pullbackEval`
+precomposes a target evaluator with `T.post`, which maps source stages into
+the evaluator's domain. The admissible source guard is instead `T.pullback q`,
+by adjunction. Weakening restricts stages using `p ≤ q`. No monotonicity or
+naturality of the evaluator is assumed. Transport preserves guarded
+equivalence, but need not reflect it when some target stages are unreachable.
+
+The numeric and Boolean IR evaluators from Round 8 are transported across
+the heterogeneous entry edge `(x,y) ↦ (y,false,x)`. The target guard 011
+becomes source guard 10. Source 11 is restricted to 10, enters at 001,
+and evaluates both original and middle terms to 1 (true for the Boolean
+interpretation). Without the guard the numeric values are 2 and 1.
+
+A new loop swaps y and z, preserving 011 while alternating 001 and 010.
+Thus the hoisted rewrite remains equal for all iteration counts even though
+the loop state changes. Independent numeric computation checks cover 64
+weakening guard pairs, 8 pullback guards, 32 source/target pairs, and 3072
+loop-hoisted cases at depths 0 through 5: 3176 cases. Both interpreters also
+have exact transported guard tables and an all-natural hoisting witness.
+Negative witnesses distinguish the two transfer directions, composition
+order, and each required semantic hypothesis. No target placeholder or
+Classical.choice dependency is used.
+-/
+
+namespace Round9
+
+/-- Weakening restricts the set of stages that must be checked. -/
+theorem equiv_weaken {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p q : α) (t₁ t₂ : Term)
+    (hpq : Forces p q) (h : GuardedEquiv eval q t₁ t₂) :
+    GuardedEquiv eval p t₁ t₂ := by
+  intro s hs
+  exact h s (hs.trans hpq)
+
+/-- Independent transport proof using the adjunction in the required direction. -/
+theorem equiv_pullback {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (evalβ : β → Term → Val)
+    (q : β) (t₁ t₂ : Term) (h : GuardedEquiv evalβ q t₁ t₂) :
+    GuardedEquiv (pullbackEval T evalβ) (T.pullback q) t₁ t₂ := by
+  intro s hs
+  exact h (T.post s) ((T.gc s q).mpr hs)
+
+/-- Independent edge-synthesis proof at the transferred guarded stage. -/
+theorem edge_synthesize {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (evalβ : β → Term → Val)
+    (a : α) (q : β) (t₁ t₂ : Term) (h : GuardedEquiv evalβ q t₁ t₂) :
+    evalβ (T.post (a ⊓ synthesizeEdgeGuard T a q)) t₁ =
+      evalβ (T.post (a ⊓ synthesizeEdgeGuard T a q)) t₂ := by
+  exact h _ ((T.gc _ _).mpr (le_himp_iff'.mp le_rfl))
+
+/-- Independent loop-hoisted rewrite proof for every finite iteration count. -/
+theorem hoisted_rewrite {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β) (evalβ : β → Term → Val)
+    (a₀ : α) (inv q : β) (t₁ t₂ : Term)
+    (hind : IsInductiveFor L inv q) (heq : GuardedEquiv evalβ q t₁ t₂) :
+    ∀ n : ℕ,
+      evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ hoistLoopGuard E a₀ inv)) t₁ =
+        evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ hoistLoopGuard E a₀ inv)) t₂ := by
+  intro n
+  exact heq _ (Round6.hoist_target E L a₀ inv q hind n)
+
+/-- Pulling an evaluator along identity preserves it definitionally. -/
+theorem pullback_eval_id {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) : pullbackEval (CFGTransfer.id α) eval = eval := by
+  rfl
+
+/-- Evaluator precomposition follows the same source-to-target path order. -/
+theorem pullback_eval_comp {α β γ Term Val : Type*}
+    [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra γ]
+    (T₁ : CFGTransfer α β) (T₂ : CFGTransfer β γ) (eval : γ → Term → Val) :
+    pullbackEval (T₁.comp T₂) eval = pullbackEval T₁ (pullbackEval T₂ eval) := by
+  rfl
+
+open Round5 Round8
+
+/-- A nonidentity loop that keeps x fixed and exchanges the remaining coordinates. -/
+def swapYZ : CFGTransfer Stage Stage where
+  post s := (s.1, s.2.2, s.2.1)
+  pullback s := (s.1, s.2.2, s.2.1)
+  gc := by
+    rintro ⟨x₁, x₂, x₃⟩ ⟨q₁, q₂, q₃⟩
+    cases x₁ <;> cases x₂ <;> cases x₃ <;>
+      cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- Include the three-cycle to exercise both valid and invalid candidate invariants. -/
+def loop (cyclic : Bool) : CFGTransfer Stage Stage :=
+  if cyclic then Round4.loop true else swapYZ
+
+/-- Finite expansion of guarded equivalence in the two-coordinate source domain. -/
+theorem guarded_source_iff {Term Val : Type*} (eval : PreState → Term → Val)
+    (p : PreState) (t₁ t₂ : Term) :
+    GuardedEquiv eval p t₁ t₂ ↔
+      ∀ x y : Bool, (x, y) ≤ p → eval (x, y) t₁ = eval (x, y) t₂ := by
+  constructor
+  · exact fun h x y hs => h (x, y) hs
+  · rintro h ⟨x, y⟩ hs
+    exact h x y hs
+
+/-- Exact transported guard tables for both interpretations of the IR. -/
+theorem upstream_guard_classification (p : PreState) :
+    (GuardedEquiv (pullbackEval entry evalNat) p original middle ↔ p.2 = false) ∧
+    (GuardedEquiv (pullbackEval entry evalBool) p original middle ↔ p.2 = false) := by
+  simp only [guarded_source_iff]
+  rcases p with ⟨x, y⟩
+  cases x <;> cases y <;> decide
+
+/-- The transported evaluators compute on the entry post-state, retaining source x. -/
+theorem upstream_value_table (x y : Bool) :
+    pullbackEval entry evalNat (x, y) original =
+      (if y then 1 else 0) + (if x then 1 else 0) ∧
+    pullbackEval entry evalNat (x, y) middle = (if x then 1 else 0) ∧
+    pullbackEval entry evalBool (x, y) original = (y || x) ∧
+    pullbackEval entry evalBool (x, y) middle = x := by
+  cases x <;> cases y <;> decide
+
+/-- All 64 pairs of downstream guards, retaining the stage-inclusion premise. -/
+theorem finite_weaken (p q : Stage) :
+    Forces p q → GuardedEquiv evalNat q original middle → GuardedEquiv evalNat p original middle := by
+  rw [(nat_guard_classification q).1, (nat_guard_classification p).1]
+  unfold Forces
+  rcases p with ⟨p₁, p₂, p₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases p₁ <;> cases p₂ <;> cases p₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- Every downstream guard is tested against its transported source guard. -/
+theorem finite_pullback (q : Stage) :
+    GuardedEquiv evalNat q original middle →
+      GuardedEquiv (pullbackEval entry evalNat) (entry.pullback q) original middle := by
+  rw [(nat_guard_classification q).1, (upstream_guard_classification (entry.pullback q)).1]
+  rcases q with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- All 32 source/target pairs for actual transferred term equality. -/
+theorem finite_edge_synthesis (a : PreState) (q : Stage) :
+    GuardedEquiv evalNat q original middle →
+      evalNat (entry.post (a ⊓ synthesizeEdgeGuard entry a q)) original =
+        evalNat (entry.post (a ⊓ synthesizeEdgeGuard entry a q)) middle := by
+  rw [(nat_guard_classification q).1]
+  rcases a with ⟨a₁, a₂⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases a₁ <;> cases a₂ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- Both loops, every source/invariant/target, and all six depths 0 through 5. -/
+theorem finite_hoist (cyclic : Bool) (a₀ : PreState) (inv q : Stage) :
+    IsInductiveFor (loop cyclic) inv q → GuardedEquiv evalNat q original middle →
+      Round6.ThroughFive (fun n =>
+        evalNat ((entry.comp ((loop cyclic).iterate n)).post
+          (a₀ ⊓ hoistLoopGuard entry a₀ inv)) original =
+        evalNat ((entry.comp ((loop cyclic).iterate n)).post
+          (a₀ ⊓ hoistLoopGuard entry a₀ inv)) middle) := by
+  rw [(nat_guard_classification q).1]
+  unfold IsInductiveFor IsLoopInvariant Round6.ThroughFive
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases cyclic <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;>
+    cases i₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- The edge guard is proper and nonbottom; it repairs a genuine downstream difference. -/
+theorem interblock_active_witness :
+    let a : PreState := (true, true)
+    let g := synthesizeEdgeGuard entry a guardX
+    let reached := entry.post (a ⊓ g)
+    GuardedEquiv evalNat guardX original middle ∧
+    GuardedEquiv (pullbackEval entry evalNat) (entry.pullback guardX) original middle ∧
+    entry.pullback guardX = (true, false) ∧ g = (true, false) ∧
+    reached = (false, false, true) ∧ evalNat reached original = 1 ∧ evalNat reached middle = 1 ∧
+    evalBool reached original = true ∧ evalBool reached middle = true ∧
+    evalNat (entry.post a) original ≠ evalNat (entry.post a) middle := by
+  dsimp only
+  simp only [guarded_cube_iff, guarded_source_iff]
+  decide
+
+/-- Source transport need not reflect equivalence: entry never reaches a stage with y=true. -/
+theorem pullback_converse_fails :
+    ¬ GuardedEquiv evalNat guardX middle optimized ∧
+    GuardedEquiv (pullbackEval entry evalNat) (entry.pullback guardX) middle optimized := by
+  simp only [guarded_cube_iff, guarded_source_iff]
+  decide
+
+/-- Reversing the guard-inclusion direction would incorrectly admit unrestricted stages. -/
+theorem weakening_direction_matters :
+    Forces guardX (⊤ : Stage) ∧ GuardedEquiv evalNat guardX original middle ∧
+    ¬ GuardedEquiv evalNat ⊤ original middle := by
+  simp only [guarded_cube_iff]
+  unfold Forces
+  decide
+
+/-- A source stage permitted by the pullback guard must be evaluated through post. -/
+theorem evaluator_direction_matters :
+    let T := Round4.loop true
+    let s : Stage := (false, true, false)
+    Forces s (T.pullback guardX) ∧
+    pullbackEval T evalNat s original = pullbackEval T evalNat s middle ∧
+    evalNat (T.pullback s) original ≠ evalNat (T.pullback s) middle := by
+  dsimp only
+  unfold Forces
+  decide
+
+/-- Actual nonempty loop states alternate after the single preheader check. -/
+theorem hoisted_state_trace :
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)
+    IsInductiveFor swapYZ guardX guardX ∧ entered = (false, false, true) ∧
+    (swapYZ.iterate 0).post entered = (false, false, true) ∧
+    (swapYZ.iterate 1).post entered = (false, true, false) ∧
+    (swapYZ.iterate 2).post entered = (false, false, true) ∧
+    (swapYZ.iterate 5).post entered = (false, true, false) := by
+  dsimp only
+  unfold IsInductiveFor IsLoopInvariant
+  decide
+
+/-- Both interpretations admit this concrete rewrite for every natural iteration count. -/
+theorem hoisted_rewrites_all_steps :
+    ∀ n : ℕ,
+      (evalNat ((entry.comp (swapYZ.iterate n)).post
+        ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)) original =
+       evalNat ((entry.comp (swapYZ.iterate n)).post
+        ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)) middle) ∧
+      (evalBool ((entry.comp (swapYZ.iterate n)).post
+        ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)) original =
+       evalBool ((entry.comp (swapYZ.iterate n)).post
+        ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)) middle) := by
+  intro n
+  have hind : IsInductiveFor swapYZ guardX guardX := by
+    unfold IsInductiveFor IsLoopInvariant
+    decide
+  exact ⟨hoisted_rewrite entry swapYZ evalNat (true, true) guardX guardX original middle
+      hind ((nat_guard_classification guardX).1.mpr rfl) n,
+    hoisted_rewrite entry swapYZ evalBool (true, true) guardX guardX original middle
+      hind ((bool_guard_classification guardX).1.mpr rfl) n⟩
+
+/-- Reversing entry/loop order changes a successful conditional rewrite into a failure. -/
+theorem composition_order_matters :
+    let E := Round4.loop true
+    let g := hoistLoopGuard E (true, true, true) guardX
+    g = (true, true, false) ∧
+    evalNat ((E.comp swapYZ).post g) original = evalNat ((E.comp swapYZ).post g) middle ∧
+    evalNat ((swapYZ.comp E).post g) original ≠ evalNat ((swapYZ.comp E).post g) middle := by
+  dsimp only
+  decide
+
+/-- Entry establishes the rewrite condition, but a non-preserving loop can destroy it. -/
+theorem preservation_required :
+    let L := Round4.loop true
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) guardX)
+    GuardedEquiv evalNat guardX original middle ∧ ¬ IsLoopInvariant L guardX ∧
+    evalNat entered original = evalNat entered middle ∧
+    evalNat (L.post entered) original ≠ evalNat (L.post entered) middle := by
+  dsimp only
+  simp only [guarded_cube_iff]
+  unfold IsLoopInvariant
+  decide
+
+/-- A preserved invariant must also imply the rewrite condition. -/
+theorem entailment_required :
+    let inv : Stage := ⊤
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    IsLoopInvariant swapYZ inv ∧ ¬ Forces inv guardX ∧
+    GuardedEquiv evalNat guardX original middle ∧
+    evalNat entered original ≠ evalNat entered middle := by
+  dsimp only
+  simp only [guarded_cube_iff]
+  unfold IsLoopInvariant Forces
+  decide
+
+/-- Inductivity by itself cannot supply an invalid term-equivalence premise. -/
+theorem rewrite_equivalence_required :
+    let inv : Stage := ⊤
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    IsInductiveFor swapYZ inv inv ∧ ¬ GuardedEquiv evalNat inv original middle ∧
+    evalNat entered original ≠ evalNat entered middle := by
+  dsimp only
+  simp only [guarded_cube_iff]
+  unfold IsInductiveFor IsLoopInvariant
+  decide
+
+end Round9
 
 end CatSem.RedTeam

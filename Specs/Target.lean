@@ -202,4 +202,39 @@ theorem guardedEquiv_synthesize_chain (eval : α → Term → Val) (a p₁ p₂ 
       eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) t₃ := by
   sorry
 
+/-- Guarded Equivalence Monotonicity (Weakening): If `Forces p q` and
+    `GuardedEquiv eval q t₁ t₂`, then `GuardedEquiv eval p t₁ t₂`. -/
+theorem guardedEquiv_weaken (eval : α → Term → Val) (p q : α) (t₁ t₂ : Term)
+    (hpq : Forces p q) (h : GuardedEquiv eval q t₁ t₂) :
+    GuardedEquiv eval p t₁ t₂ := by
+  sorry
+
+/-- Kripke-Joyal Pullback of Guarded Equivalence: If `GuardedEquiv evalβ q t₁ t₂`,
+    then `GuardedEquiv (pullbackEval T evalβ) (T.pullback q) t₁ t₂`. -/
+theorem guardedEquiv_pullback (T : CFGTransfer α β) (evalβ : β → Term → Val)
+    (q : β) (t₁ t₂ : Term) (h : GuardedEquiv evalβ q t₁ t₂) :
+    GuardedEquiv (pullbackEval T evalβ) (T.pullback q) t₁ t₂ := by
+  sorry
+
+/-- Inter-Block Abductive Guarded Rewrite Soundness: If `GuardedEquiv evalβ q t₁ t₂`,
+    then at any upstream stage `a : α`, conjoining `a` with `synthesizeEdgeGuard T a q`
+    guarantees `t₁` and `t₂` evaluate identically after transferring across `T`. -/
+theorem guardedEquiv_edge_synthesize (T : CFGTransfer α β) (evalβ : β → Term → Val)
+    (a : α) (q : β) (t₁ t₂ : Term) (h : GuardedEquiv evalβ q t₁ t₂) :
+    evalβ (T.post (a ⊓ synthesizeEdgeGuard T a q)) t₁ =
+      evalβ (T.post (a ⊓ synthesizeEdgeGuard T a q)) t₂ := by
+  sorry
+
+/-- Loop-Hoisted Guarded Rewrite Soundness: If `IsInductiveFor L inv q` and
+    `GuardedEquiv evalβ q t₁ t₂`, then for every iteration count `n : ℕ`, the single
+    preheader guard `hoistLoopGuard E a₀ inv` guarantees `t₁` and `t₂` evaluate identically
+    after entering the loop and running `n` iterations. -/
+theorem guardedEquiv_hoistLoopGuard_iterate (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (evalβ : β → Term → Val) (a₀ : α) (inv q : β) (t₁ t₂ : Term)
+    (hind : IsInductiveFor L inv q) (heq : GuardedEquiv evalβ q t₁ t₂) :
+    ∀ n : ℕ,
+      evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ hoistLoopGuard E a₀ inv)) t₁ =
+        evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ hoistLoopGuard E a₀ inv)) t₂ := by
+  sorry
+
 end CatSem

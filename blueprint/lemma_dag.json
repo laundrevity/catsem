@@ -225,6 +225,36 @@
         "forces_rewrite_chain_iff"
       ],
       "informal_claim": "Given GuardedEquiv eval p1 t1 t2 and GuardedEquiv eval p2 t2 t3, at any stage a, conjoining a with synthesizeGuard a p1 meet synthesizeGuard a p2 guarantees eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) t1 = eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) t3."
+    },
+    {
+      "id": "guardedEquiv_weaken",
+      "status": "spec_locked",
+      "informal_claim": "If Forces p q and GuardedEquiv eval q t1 t2, then GuardedEquiv eval p t1 t2."
+    },
+    {
+      "id": "guardedEquiv_pullback",
+      "status": "spec_locked",
+      "depends_on": [
+        "forcesAfter_iff_pullback"
+      ],
+      "informal_claim": "If GuardedEquiv eval_beta q t1 t2, then GuardedEquiv (pullbackEval T eval_beta) (T.pullback q) t1 t2."
+    },
+    {
+      "id": "guardedEquiv_edge_synthesize",
+      "status": "spec_locked",
+      "depends_on": [
+        "guardedEquiv_pullback",
+        "synthesizeEdgeGuard_sound"
+      ],
+      "informal_claim": "If GuardedEquiv eval_beta q t1 t2, then at any upstream stage a, eval_beta (T.post (a meet synthesizeEdgeGuard T a q)) t1 = eval_beta (T.post (a meet synthesizeEdgeGuard T a q)) t2."
+    },
+    {
+      "id": "guardedEquiv_hoistLoopGuard_iterate",
+      "status": "spec_locked",
+      "depends_on": [
+        "forcesAfter_hoistLoopGuard_iterate"
+      ],
+      "informal_claim": "If IsInductiveFor L inv q and GuardedEquiv eval_beta q t1 t2, then for every iteration count n : Nat, eval_beta ((E.comp (L.iterate n)).post (a0 meet hoistLoopGuard E a0 inv)) t1 = eval_beta ((E.comp (L.iterate n)).post (a0 meet hoistLoopGuard E a0 inv)) t2."
     }
   ]
 }

@@ -171,6 +171,34 @@ example {α Term Val : Type*} [HeytingAlgebra α]
       eval (a ⊓ (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂)) t₃ :=
   CatSem.guardedEquiv_synthesize_chain eval a p₁ p₂ t₁ t₂ t₃ h₁ h₂
 
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p q : α) (t₁ t₂ : Term)
+    (hpq : CatSem.Forces p q) (h : CatSem.GuardedEquiv eval q t₁ t₂) :
+    CatSem.GuardedEquiv eval p t₁ t₂ :=
+  CatSem.guardedEquiv_weaken eval p q t₁ t₂ hpq h
+
+example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (evalβ : β → Term → Val)
+    (q : β) (t₁ t₂ : Term) (h : CatSem.GuardedEquiv evalβ q t₁ t₂) :
+    CatSem.GuardedEquiv (CatSem.pullbackEval T evalβ) (T.pullback q) t₁ t₂ :=
+  CatSem.guardedEquiv_pullback T evalβ q t₁ t₂ h
+
+example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (evalβ : β → Term → Val)
+    (a : α) (q : β) (t₁ t₂ : Term) (h : CatSem.GuardedEquiv evalβ q t₁ t₂) :
+    evalβ (T.post (a ⊓ CatSem.synthesizeEdgeGuard T a q)) t₁ =
+      evalβ (T.post (a ⊓ CatSem.synthesizeEdgeGuard T a q)) t₂ :=
+  CatSem.guardedEquiv_edge_synthesize T evalβ a q t₁ t₂ h
+
+example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CatSem.CFGTransfer α β) (L : CatSem.CFGTransfer β β)
+    (evalβ : β → Term → Val) (a₀ : α) (inv q : β) (t₁ t₂ : Term)
+    (hind : CatSem.IsInductiveFor L inv q) (heq : CatSem.GuardedEquiv evalβ q t₁ t₂) :
+    ∀ n : ℕ,
+      evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) t₁ =
+        evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) t₂ :=
+  CatSem.guardedEquiv_hoistLoopGuard_iterate E L evalβ a₀ inv q t₁ t₂ hind heq
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -201,5 +229,9 @@ example {α Term Val : Type*} [HeytingAlgebra α]
 #print axioms CatSem.guardedEquiv_symm
 #print axioms CatSem.guardedEquiv_trans_inf
 #print axioms CatSem.guardedEquiv_synthesize_chain
+#print axioms CatSem.guardedEquiv_weaken
+#print axioms CatSem.guardedEquiv_pullback
+#print axioms CatSem.guardedEquiv_edge_synthesize
+#print axioms CatSem.guardedEquiv_hoistLoopGuard_iterate
 
 end CatSem.Verify

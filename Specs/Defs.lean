@@ -134,4 +134,15 @@ example (eval : Prop → ℕ → ℕ) (t : ℕ) : GuardedEquiv eval False t t :=
   intro _ _
   rfl
 
+/-- Pullback of a stage-indexed semantic evaluator `evalβ : β → Term → Val` along a
+    CFG transfer `T : CFGTransfer α β`. -/
+def pullbackEval {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (evalβ : β → Term → Val) : α → Term → Val :=
+  fun s t => evalβ (T.post s) t
+
+-- Sanity checks on evaluator pullback over Prop
+example (eval : Prop → ℕ → ℕ) (s : Prop) (t : ℕ) :
+    pullbackEval (CFGTransfer.id Prop) eval s t = eval s t := by
+  rfl
+
 end CatSem
