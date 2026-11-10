@@ -201,6 +201,30 @@
         "hoistLoopGuard_iterate_target"
       ],
       "informal_claim": "If IsInductiveFor L inv target, then for every iteration count n : Nat, the guarded preheader stage forces target along the composed morphism E.comp (L.iterate n)."
+    },
+    {
+      "id": "guardedEquiv_refl",
+      "status": "spec_locked",
+      "informal_claim": "Any term t is guardedly equivalent to itself under top (GuardedEquiv eval top t t)."
+    },
+    {
+      "id": "guardedEquiv_symm",
+      "status": "spec_locked",
+      "informal_claim": "Guarded equivalence is symmetric: GuardedEquiv eval p t1 t2 -> GuardedEquiv eval p t2 t1."
+    },
+    {
+      "id": "guardedEquiv_trans_inf",
+      "status": "spec_locked",
+      "informal_claim": "Chaining two conditional rewrites GuardedEquiv eval p1 t1 t2 and GuardedEquiv eval p2 t2 t3 yields GuardedEquiv eval (p1 meet p2) t1 t3."
+    },
+    {
+      "id": "guardedEquiv_synthesize_chain",
+      "status": "spec_locked",
+      "depends_on": [
+        "guardedEquiv_trans_inf",
+        "forces_rewrite_chain_iff"
+      ],
+      "informal_claim": "Given GuardedEquiv eval p1 t1 t2 and GuardedEquiv eval p2 t2 t3, at any stage a, conjoining a with synthesizeGuard a p1 meet synthesizeGuard a p2 guarantees eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) t1 = eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) t3."
     }
   ]
 }

@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 7 match their blueprint claims after unfolding
+The target statements through Round 8 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All twenty-six declarations in `Specs.Target` currently have placeholder proofs. None
+All thirty declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -1259,5 +1259,254 @@ theorem delayed_forcing_failure :
   decide
 
 end Round7
+
+/-!
+## Round 8: stage-guarded IR equivalence
+
+The definition and all four theorem statements match the blueprint exactly.
+`GuardedEquiv eval p t₁ t₂` checks equality at every `s ≤ p`, not just at `p`.
+All guards include bottom, so even a bottom guard requires equality there.
+No evaluator monotonicity or restriction law is assumed or needed: both
+rewrites are compared at the same stage. Synthesized-chain soundness gives
+equality at the guarded stage, not at the original stage, and does not claim
+the residual is weakest for endpoint equivalence.
+
+The concrete IR has variables, constants, and binary addition. Its numeric
+interpretation uses 0/1 inputs and natural addition; its Boolean interpretation
+uses disjunction. The chain is x+(y+z) -> y+z -> z. The first guard forbids x,
+the second forbids y, and their meet still permits z. The numeric endpoint
+values agree exactly when x=y=false, and vary with z even inside that guard.
+Both evaluators have the same exact classification of guarded equivalence;
+Boolean pointwise equality alone can hold outside the valid guard.
+
+Besides general proofs, the audit checks every guard for all three pairs,
+all 64 pairs of guards for transitivity, and all 512 source/guard/guard
+combinations for synthesis, under both evaluators. Explicit witnesses reject
+guard joins, omitted premises, equality only at the maximal stage, and
+assuming equality at the original unguarded stage. No target placeholder or
+choice-dependent proof is used.
+-/
+
+namespace Round8
+
+/-- Independent reflexivity proof, requiring no property of the evaluator. -/
+theorem equiv_refl {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (t : Term) : GuardedEquiv eval ⊤ t t := by
+  intro s _
+  rfl
+
+/-- Independent symmetry proof at each forcing stage. -/
+theorem equiv_symm {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p : α) (t₁ t₂ : Term) :
+    GuardedEquiv eval p t₁ t₂ → GuardedEquiv eval p t₂ t₁ := by
+  intro h s hs
+  exact (h s hs).symm
+
+/-- Both rewrite premises apply to every stage below the meet. -/
+theorem equiv_trans {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : GuardedEquiv eval p₁ t₁ t₂) (h₂ : GuardedEquiv eval p₂ t₂ t₃) :
+    GuardedEquiv eval (p₁ ⊓ p₂) t₁ t₃ := by
+  intro s hs
+  exact (h₁ s (hs.trans inf_le_left)).trans (h₂ s (hs.trans inf_le_right))
+
+/-- Independent synthesized-chain proof using the audited forcing equivalence. -/
+theorem synthesized_chain {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (a p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : GuardedEquiv eval p₁ t₁ t₂) (h₂ : GuardedEquiv eval p₂ t₂ t₃) :
+    eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) t₁ =
+      eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) t₃ := by
+  exact equiv_trans eval p₁ p₂ t₁ t₂ t₃ h₁ h₂ _
+    ((Round7.rewrite_chain a p₁ p₂ _).mpr le_rfl)
+
+abbrev Stage := Round4.State
+
+/-- A small expression IR with two independently removable input contributions. -/
+inductive IR where
+  | zero
+  | one
+  | x
+  | y
+  | z
+  | add (left right : IR)
+
+/-- Numeric evaluation with the three stage bits supplying 0/1 variable values. -/
+def evalNat (s : Stage) : IR → ℕ
+  | .zero => 0
+  | .one => 1
+  | .x => if s.1 then 1 else 0
+  | .y => if s.2.1 then 1 else 0
+  | .z => if s.2.2 then 1 else 0
+  | .add l r => evalNat s l + evalNat s r
+
+/-- Boolean evaluation of the same syntax, with addition interpreted as disjunction. -/
+def evalBool (s : Stage) : IR → Bool
+  | .zero => false
+  | .one => true
+  | .x => s.1
+  | .y => s.2.1
+  | .z => s.2.2
+  | .add l r => evalBool s l || evalBool s r
+
+def original : IR := .add .x (.add .y .z)
+def middle : IR := .add .y .z
+def optimized : IR := .z
+def guardX : Stage := (false, true, true)
+def guardY : Stage := (true, false, true)
+
+/-- Expand the universal stage check into three finite Boolean quantifiers. -/
+theorem guarded_cube_iff {Term Val : Type*} (eval : Stage → Term → Val)
+    (p : Stage) (t₁ t₂ : Term) :
+    GuardedEquiv eval p t₁ t₂ ↔
+      ∀ x y z : Bool, (x, y, z) ≤ p → eval (x, y, z) t₁ = eval (x, y, z) t₂ := by
+  constructor
+  · exact fun h x y z hs => h (x, y, z) hs
+  · rintro h ⟨x, y, z⟩ hs
+    exact h x y z hs
+
+/-- Numeric equality holds pointwise exactly under the intended stage restrictions. -/
+theorem numeric_pointwise_table (x y z : Bool) :
+    (evalNat (x, y, z) original = evalNat (x, y, z) middle ↔ x = false) ∧
+    (evalNat (x, y, z) middle = evalNat (x, y, z) optimized ↔ y = false) ∧
+    (evalNat (x, y, z) original = evalNat (x, y, z) optimized ↔ x = false ∧ y = false) := by
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- Exact guarded-equivalence table over every numeric guard, including bottom and top. -/
+theorem nat_guard_classification (p : Stage) :
+    (GuardedEquiv evalNat p original middle ↔ p.1 = false) ∧
+    (GuardedEquiv evalNat p middle optimized ↔ p.2.1 = false) ∧
+    (GuardedEquiv evalNat p original optimized ↔ p.1 = false ∧ p.2.1 = false) := by
+  simp only [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- Universal substage checking yields the same exact guards for the Boolean evaluator. -/
+theorem bool_guard_classification (p : Stage) :
+    (GuardedEquiv evalBool p original middle ↔ p.1 = false) ∧
+    (GuardedEquiv evalBool p middle optimized ↔ p.2.1 = false) ∧
+    (GuardedEquiv evalBool p original optimized ↔ p.1 = false ∧ p.2.1 = false) := by
+  simp only [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- Concrete reflexivity for every term in the chain, under both interpretations. -/
+theorem concrete_refl :
+    GuardedEquiv evalNat ⊤ original original ∧ GuardedEquiv evalNat ⊤ middle middle ∧
+    GuardedEquiv evalNat ⊤ optimized optimized ∧ GuardedEquiv evalBool ⊤ original original ∧
+    GuardedEquiv evalBool ⊤ middle middle ∧ GuardedEquiv evalBool ⊤ optimized optimized := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Concrete symmetry at every guard under both interpretations. -/
+theorem finite_symm (p : Stage) :
+    (GuardedEquiv evalNat p original middle → GuardedEquiv evalNat p middle original) ∧
+    (GuardedEquiv evalBool p original middle → GuardedEquiv evalBool p middle original) := by
+  simp only [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- All 64 guard pairs for each interpretation, keeping both rewrite hypotheses. -/
+theorem finite_trans (p q : Stage) :
+    (GuardedEquiv evalNat p original middle → GuardedEquiv evalNat q middle optimized →
+      GuardedEquiv evalNat (p ⊓ q) original optimized) ∧
+    (GuardedEquiv evalBool p original middle → GuardedEquiv evalBool q middle optimized →
+      GuardedEquiv evalBool (p ⊓ q) original optimized) := by
+  rw [(nat_guard_classification p).1, (nat_guard_classification q).2.1,
+    (nat_guard_classification (p ⊓ q)).2.2,
+    (bool_guard_classification p).1, (bool_guard_classification q).2.1,
+    (bool_guard_classification (p ⊓ q)).2.2]
+  rcases p with ⟨p₁, p₂, p₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases p₁ <;> cases p₂ <;> cases p₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- All 512 source/guard/guard combinations for each evaluator. -/
+theorem finite_synthesis (a p q : Stage) :
+    (GuardedEquiv evalNat p original middle → GuardedEquiv evalNat q middle optimized →
+      evalNat (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) original =
+        evalNat (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) optimized) ∧
+    (GuardedEquiv evalBool p original middle → GuardedEquiv evalBool q middle optimized →
+      evalBool (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) original =
+        evalBool (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) optimized) := by
+  simp only [guarded_cube_iff]
+  rcases a with ⟨a₁, a₂, a₃⟩
+  rcases p with ⟨p₁, p₂, p₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases a₁ <;> cases a₂ <;> cases a₃ <;> cases p₁ <;> cases p₂ <;>
+    cases p₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- Both chains have satisfiable, proper guards whose meet remains nonbottom. -/
+theorem concrete_rewrites :
+    GuardedEquiv evalNat guardX original middle ∧ GuardedEquiv evalNat guardY middle optimized ∧
+    GuardedEquiv evalNat (guardX ⊓ guardY) original optimized ∧
+    GuardedEquiv evalBool guardX original middle ∧ GuardedEquiv evalBool guardY middle optimized ∧
+    GuardedEquiv evalBool (guardX ⊓ guardY) original optimized := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Synthesizing the two conditional rewrites keeps z and removes exactly x and y. -/
+theorem residual_stage_table (x y z : Bool) :
+    let a : Stage := (x, y, z)
+    let residual := synthesizeGuard a guardX ⊓ synthesizeGuard a guardY
+    residual = (!x, !y, true) ∧ a ⊓ residual = (false, false, z) ∧
+    evalNat (a ⊓ residual) original = (if z then 1 else 0) ∧
+    evalNat (a ⊓ residual) optimized = (if z then 1 else 0) ∧
+    evalBool (a ⊓ residual) original = z ∧ evalBool (a ⊓ residual) optimized = z := by
+  dsimp only
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- Nonbottom guarded equality has value 1, differs from the bottom value 0,
+and does not imply equality at the original maximal stage. -/
+theorem active_stage_witness :
+    guardX ⊓ guardY = (false, false, true) ∧
+    evalNat (false, false, true) original = 1 ∧ evalNat (false, false, true) optimized = 1 ∧
+    evalNat (false, false, false) original = 0 ∧
+    evalNat (true, true, true) original = 3 ∧ evalNat (true, true, true) optimized = 1 := by
+  decide
+
+/-- Joining the guards cannot replace their conjunction. -/
+theorem guard_join_counterexample :
+    ¬ GuardedEquiv evalNat (guardX ⊔ guardY) original optimized ∧
+    ¬ GuardedEquiv evalBool (guardX ⊔ guardY) original optimized := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Either missing rewrite premise permits a failing endpoint equivalence. -/
+theorem both_rewrites_required :
+    (¬ GuardedEquiv evalNat ⊤ original middle ∧
+      GuardedEquiv evalNat guardY middle optimized ∧
+      ¬ GuardedEquiv evalNat (⊤ ⊓ guardY) original optimized) ∧
+    (GuardedEquiv evalNat guardX original middle ∧
+      ¬ GuardedEquiv evalNat ⊤ middle optimized ∧
+      ¬ GuardedEquiv evalNat (guardX ⊓ ⊤) original optimized) := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Boolean equality at p itself is insufficient: a smaller forcing stage distinguishes terms. -/
+theorem checking_only_guard_stage_fails :
+    evalBool (true, false, true) original = evalBool (true, false, true) middle ∧
+    Forces (true, false, false) (true, false, true) ∧
+    evalBool (true, false, false) original ≠ evalBool (true, false, false) middle ∧
+    ¬ GuardedEquiv evalBool (true, false, true) original middle := by
+  simp only [guarded_cube_iff]
+  unfold Forces
+  decide
+
+/-- Bottom forces every guard, so incompatible constant terms have no guard at all. -/
+theorem constants_never_equiv (p : Stage) : ¬ GuardedEquiv evalNat p .zero .one := by
+  intro h
+  have hb := h (false, false, false) bot_le
+  change (0 : ℕ) = 1 at hb
+  cases hb
+
+/-- Conservative supplied preconditions can synthesize a stricter guard than endpoint equality needs. -/
+theorem residual_need_not_be_weakest :
+    GuardedEquiv evalNat ⊥ original middle ∧ GuardedEquiv evalNat guardY middle optimized ∧
+    synthesizeGuard (true, true, true) (⊥ : Stage) ⊓
+      synthesizeGuard (true, true, true) guardY = (false, false, false) ∧
+    GuardedEquiv evalNat (false, false, true) original optimized := by
+  simp only [guarded_cube_iff]
+  decide
+
+end Round8
 
 end CatSem.RedTeam

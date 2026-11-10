@@ -2,7 +2,7 @@ import Specs.Defs
 
 namespace CatSem
 
-variable {α β β₁ β₂ γ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂] [HeytingAlgebra γ]
+variable {α β β₁ β₂ γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂] [HeytingAlgebra γ]
 
 /-- Soundness: Conjoining state `a` with `synthesizeGuard a b` establishes `b`. -/
 theorem synthesizeGuard_sound (a b : α) :
@@ -172,6 +172,34 @@ theorem forces_rewrite_chain_iff (a p₁ p₂ g : α) :
 theorem forcesAfter_hoistLoopGuard_iterate (E : CFGTransfer α β) (L : CFGTransfer β β)
     (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
     ∀ n : ℕ, ForcesAfter (E.comp (L.iterate n)) (a₀ ⊓ hoistLoopGuard E a₀ inv) target := by
+  sorry
+
+/-- Reflexivity of Guarded Equivalence: Any term `t` is guardedly equivalent to itself under `⊤`. -/
+theorem guardedEquiv_refl (eval : α → Term → Val) (t : Term) :
+    GuardedEquiv eval ⊤ t t := by
+  sorry
+
+/-- Symmetry of Guarded Equivalence: Guarded equivalence is symmetric. -/
+theorem guardedEquiv_symm (eval : α → Term → Val) (p : α) (t₁ t₂ : Term) :
+    GuardedEquiv eval p t₁ t₂ → GuardedEquiv eval p t₂ t₁ := by
+  sorry
+
+/-- Conjunctive Transitivity of Guarded Equivalence: Chaining two conditional rewrites
+    `GuardedEquiv eval p₁ t₁ t₂` and `GuardedEquiv eval p₂ t₂ t₃` yields a sound equivalence
+    under the conjoined guard `p₁ ⊓ p₂`. -/
+theorem guardedEquiv_trans_inf (eval : α → Term → Val) (p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : GuardedEquiv eval p₁ t₁ t₂) (h₂ : GuardedEquiv eval p₂ t₂ t₃) :
+    GuardedEquiv eval (p₁ ⊓ p₂) t₁ t₃ := by
+  sorry
+
+/-- Abductive Rewrite-Chain Soundness: Given `GuardedEquiv eval p₁ t₁ t₂` and
+    `GuardedEquiv eval p₂ t₂ t₃`, at any stage `a : α`, conjoining `a` with the synthesized
+    residual guard `synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂` guarantees `t₁` and `t₃`
+    evaluate identically at the guarded stage. -/
+theorem guardedEquiv_synthesize_chain (eval : α → Term → Val) (a p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : GuardedEquiv eval p₁ t₁ t₂) (h₂ : GuardedEquiv eval p₂ t₂ t₃) :
+    eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) t₁ =
+      eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) t₃ := by
   sorry
 
 end CatSem

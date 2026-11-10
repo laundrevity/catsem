@@ -118,4 +118,20 @@ example : Forces False True := by
 example : ForcesAfter (CFGTransfer.id Prop) True True := by
   simp [ForcesAfter, Forces, CFGTransfer.id]
 
+/-- Stage-guarded conditional equivalence for compiler IR terms `Term` interpreted over a
+    semantic domain `Val` indexed by Heyting stages `α`: `t₁` and `t₂` evaluate identically
+    at every stage `s` that Kripke-Joyal forces `p`. -/
+def GuardedEquiv {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p : α) (t₁ t₂ : Term) : Prop :=
+  ∀ s : α, Forces s p → eval s t₁ = eval s t₂
+
+-- Sanity checks on stage-guarded conditional equivalence over Prop
+example (eval : Prop → ℕ → ℕ) (t : ℕ) : GuardedEquiv eval True t t := by
+  intro _ _
+  rfl
+
+example (eval : Prop → ℕ → ℕ) (t : ℕ) : GuardedEquiv eval False t t := by
+  intro _ _
+  rfl
+
 end CatSem

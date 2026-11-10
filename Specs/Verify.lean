@@ -148,6 +148,29 @@ example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
     ∀ n : ℕ, CatSem.ForcesAfter (E.comp (L.iterate n)) (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv) target :=
   CatSem.forcesAfter_hoistLoopGuard_iterate E L a₀ inv target h
 
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (t : Term) :
+    CatSem.GuardedEquiv eval ⊤ t t :=
+  CatSem.guardedEquiv_refl eval t
+
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p : α) (t₁ t₂ : Term) :
+    CatSem.GuardedEquiv eval p t₁ t₂ → CatSem.GuardedEquiv eval p t₂ t₁ :=
+  CatSem.guardedEquiv_symm eval p t₁ t₂
+
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : CatSem.GuardedEquiv eval p₁ t₁ t₂) (h₂ : CatSem.GuardedEquiv eval p₂ t₂ t₃) :
+    CatSem.GuardedEquiv eval (p₁ ⊓ p₂) t₁ t₃ :=
+  CatSem.guardedEquiv_trans_inf eval p₁ p₂ t₁ t₂ t₃ h₁ h₂
+
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (a p₁ p₂ : α) (t₁ t₂ t₃ : Term)
+    (h₁ : CatSem.GuardedEquiv eval p₁ t₁ t₂) (h₂ : CatSem.GuardedEquiv eval p₂ t₂ t₃) :
+    eval (a ⊓ (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂)) t₁ =
+      eval (a ⊓ (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂)) t₃ :=
+  CatSem.guardedEquiv_synthesize_chain eval a p₁ p₂ t₁ t₂ t₃ h₁ h₂
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -174,5 +197,9 @@ example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
 #print axioms CatSem.forces_guard_iff
 #print axioms CatSem.forces_rewrite_chain_iff
 #print axioms CatSem.forcesAfter_hoistLoopGuard_iterate
+#print axioms CatSem.guardedEquiv_refl
+#print axioms CatSem.guardedEquiv_symm
+#print axioms CatSem.guardedEquiv_trans_inf
+#print axioms CatSem.guardedEquiv_synthesize_chain
 
 end CatSem.Verify
