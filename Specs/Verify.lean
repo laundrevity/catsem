@@ -34,11 +34,39 @@ example {α β₁ β₂ : Type*} [HeytingAlgebra α] [HeytingAlgebra β₁] [Hey
       g ≤ CatSem.synthesizeEdgeGuard T₁ a b₁ ⊓ CatSem.synthesizeEdgeGuard T₂ a b₂ :=
   CatSem.synthesizeBranchGuard_iff T₁ T₂ a b₁ b₂ g
 
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (b₁ b₂ : β) :
+    T.pullback (b₁ ⊓ b₂) = T.pullback b₁ ⊓ T.pullback b₂ :=
+  CatSem.pullback_map_inf T b₁ b₂
+
+example {α β γ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra γ]
+    (T₁ : CatSem.CFGTransfer α β) (T₂ : CatSem.CFGTransfer β γ)
+    (a : α) (c : γ) :
+    CatSem.synthesizeEdgeGuard (T₁.comp T₂) a c =
+      CatSem.synthesizeEdgeGuard T₁ a (T₂.pullback c) :=
+  CatSem.synthesizeEdgeGuard_comp T₁ T₂ a c
+
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (a : α) (b₁ b₂ : β) :
+    CatSem.synthesizeEdgeGuard T a (b₁ ⊓ b₂) =
+      CatSem.synthesizeEdgeGuard T a b₁ ⊓ CatSem.synthesizeEdgeGuard T a b₂ :=
+  CatSem.synthesizeEdgeGuard_map_inf T a b₁ b₂
+
+example {α γ : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
+    (P₁ P₂ : CatSem.CFGTransfer α γ) (a : α) (c : γ) (g : α) :
+    P₁.post (a ⊓ g) ⊔ P₂.post (a ⊓ g) ≤ c ↔
+      g ≤ CatSem.synthesizeEdgeGuard P₁ a c ⊓ CatSem.synthesizeEdgeGuard P₂ a c :=
+  CatSem.synthesizeDiamondGuard_iff P₁ P₂ a c g
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
 #print axioms CatSem.synthesizeEdgeGuard_sound
 #print axioms CatSem.synthesizeEdgeGuard_weakest
 #print axioms CatSem.synthesizeBranchGuard_iff
+#print axioms CatSem.pullback_map_inf
+#print axioms CatSem.synthesizeEdgeGuard_comp
+#print axioms CatSem.synthesizeEdgeGuard_map_inf
+#print axioms CatSem.synthesizeDiamondGuard_iff
 
 end CatSem.Verify

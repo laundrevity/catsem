@@ -27,17 +27,28 @@ def synthesizeEdgeGuard {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
     (T : CFGTransfer α β) (a : α) (b : β) : α :=
   synthesizeGuard a (T.pullback b)
 
--- Sanity checks on identity CFG transfer over Prop
-example :
-    let T : CFGTransfer Prop Prop :=
-      { pullback := id, post := id, gc := fun _ _ => Iff.rfl }
-    ¬ synthesizeEdgeGuard T True False := by
-  simp [synthesizeEdgeGuard, synthesizeGuard]
+/-- Identity CFG transfer on a block `α`. -/
+def CFGTransfer.id (α : Type*) [HeytingAlgebra α] : CFGTransfer α α where
+  pullback := _root_.id
+  post := _root_.id
+  gc := fun _ _ => Iff.rfl
+
+/-- Sequential composition of CFG transfers `u → v` (`T₁`) and `v → w` (`T₂`). -/
+def CFGTransfer.comp {α β γ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra γ]
+    (T₁ : CFGTransfer α β) (T₂ : CFGTransfer β γ) : CFGTransfer α γ where
+  pullback := T₁.pullback ∘ T₂.pullback
+  post := T₂.post ∘ T₁.post
+  gc := T₁.gc.compose T₂.gc
+
+-- Sanity checks on identity and composed CFG transfers over Prop
+example : ¬ synthesizeEdgeGuard (CFGTransfer.id Prop) True False := by
+  simp [synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
+
+example : synthesizeEdgeGuard (CFGTransfer.id Prop) False False := by
+  simp [synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
 
 example :
-    let T : CFGTransfer Prop Prop :=
-      { pullback := id, post := id, gc := fun _ _ => Iff.rfl }
-    synthesizeEdgeGuard T False False := by
-  simp [synthesizeEdgeGuard, synthesizeGuard]
+    synthesizeEdgeGuard ((CFGTransfer.id Prop).comp (CFGTransfer.id Prop)) False False := by
+  simp [synthesizeEdgeGuard, CFGTransfer.comp, CFGTransfer.id, synthesizeGuard]
 
 end CatSem

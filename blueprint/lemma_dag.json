@@ -45,6 +45,33 @@
         "synthesizeGuard_adjunction"
       ],
       "informal_claim": "Across two CFG branch transitions T1 and T2, T1.post (a meet g) <= b1 and T2.post (a meet g) <= b2 iff g <= synthesizeEdgeGuard T1 a b1 meet synthesizeEdgeGuard T2 a b2."
+    },
+    {
+      "id": "pullback_map_inf",
+      "status": "spec_locked",
+      "informal_claim": "Every CFGTransfer T preserves binary meets on pullbacks: T.pullback (b1 meet b2) = T.pullback b1 meet T.pullback b2."
+    },
+    {
+      "id": "synthesizeEdgeGuard_comp",
+      "status": "spec_locked",
+      "informal_claim": "Guard synthesis across a composed path T1.comp T2 equals nested stage-by-stage guard synthesis: synthesizeEdgeGuard (T1.comp T2) a c = synthesizeEdgeGuard T1 a (T2.pullback c)."
+    },
+    {
+      "id": "synthesizeEdgeGuard_map_inf",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullback_map_inf",
+        "synthesizeGuard_adjunction"
+      ],
+      "informal_claim": "Synthesizing a guard for a conjunction b1 meet b2 at the target block equals the meet of the synthesized guards: synthesizeEdgeGuard T a (b1 meet b2) = synthesizeEdgeGuard T a b1 meet synthesizeEdgeGuard T a b2."
+    },
+    {
+      "id": "synthesizeDiamondGuard_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeBranchGuard_iff"
+      ],
+      "informal_claim": "Given two converging CFG paths P1, P2 : CFGTransfer alpha gamma, P1.post (a meet g) join P2.post (a meet g) <= c iff g <= synthesizeEdgeGuard P1 a c meet synthesizeEdgeGuard P2 a c."
     }
   ]
 }

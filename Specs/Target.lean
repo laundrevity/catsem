@@ -2,7 +2,7 @@ import Specs.Defs
 
 namespace CatSem
 
-variable {α β β₁ β₂ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂]
+variable {α β β₁ β₂ γ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂] [HeytingAlgebra γ]
 
 /-- Soundness: Conjoining state `a` with `synthesizeGuard a b` establishes `b`. -/
 theorem synthesizeGuard_sound (a b : α) :
@@ -39,6 +39,33 @@ theorem synthesizeBranchGuard_iff (T₁ : CFGTransfer α β₁) (T₂ : CFGTrans
     (a : α) (b₁ : β₁) (b₂ : β₂) (g : α) :
     T₁.post (a ⊓ g) ≤ b₁ ∧ T₂.post (a ⊓ g) ≤ b₂ ↔
       g ≤ synthesizeEdgeGuard T₁ a b₁ ⊓ synthesizeEdgeGuard T₂ a b₂ := by
+  sorry
+
+/-- Meet Preservation: Every `T : CFGTransfer α β` preserves binary meets on pullbacks. -/
+theorem pullback_map_inf (T : CFGTransfer α β) (b₁ b₂ : β) :
+    T.pullback (b₁ ⊓ b₂) = T.pullback b₁ ⊓ T.pullback b₂ := by
+  sorry
+
+/-- Path Composition: Guard synthesis across a composed path `T₁.comp T₂` equals
+    nested stage-by-stage guard synthesis. -/
+theorem synthesizeEdgeGuard_comp (T₁ : CFGTransfer α β) (T₂ : CFGTransfer β γ)
+    (a : α) (c : γ) :
+    synthesizeEdgeGuard (T₁.comp T₂) a c = synthesizeEdgeGuard T₁ a (T₂.pullback c) := by
+  sorry
+
+/-- Conjunctive Target Decomposition: Synthesizing a guard for a conjunction `b₁ ⊓ b₂`
+    at the target block equals the meet of the synthesized guards. -/
+theorem synthesizeEdgeGuard_map_inf (T : CFGTransfer α β) (a : α) (b₁ b₂ : β) :
+    synthesizeEdgeGuard T a (b₁ ⊓ b₂) =
+      synthesizeEdgeGuard T a b₁ ⊓ synthesizeEdgeGuard T a b₂ := by
+  sorry
+
+/-- Diamond Join Adjunction: Given two converging CFG paths `P₁ P₂ : CFGTransfer α γ`
+    from entry `α` to join block `γ`, a guard `g : α` guarantees that the joined post-state
+    at `γ` satisfies `c` if and only if `g` implies the meet of the path guards. -/
+theorem synthesizeDiamondGuard_iff (P₁ P₂ : CFGTransfer α γ) (a : α) (c : γ) (g : α) :
+    P₁.post (a ⊓ g) ⊔ P₂.post (a ⊓ g) ≤ c ↔
+      g ≤ synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c := by
   sorry
 
 end CatSem
