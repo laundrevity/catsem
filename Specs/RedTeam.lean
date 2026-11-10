@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 6 match their blueprint claims after unfolding
+The target statements through Round 7 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All twenty-two declarations in `Specs.Target` currently have placeholder proofs. None
+All twenty-six declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -1052,5 +1052,212 @@ theorem delayed_failure_counterexample :
   decide
 
 end Round6
+
+/-!
+## Round 7: algebraic forcing and rewrite preconditions
+
+The two definitions and all four theorem statements match the blueprint.
+`Forces a p` means `a ≤ p`; `ForcesAfter T a q` means `T.post a ≤ q`.
+The first equivalence is the transfer adjunction, and the guard/chain
+equivalences follow from Heyting adjunction and meet. The hoisted forcing
+claim unfolds to the arbitrary-iteration target claim from Round 6.
+
+Scope: these definitions implement an order-based forcing fragment. They
+introduce no site, covers, or recursive quantifier/locality clauses for full
+Kripke-Joyal semantics. The rewrite-chain theorem establishes both conditions
+at one guarded stage; it does not model sequential state-changing rewrites.
+A concrete counterexample below separates these interpretations.
+
+The independent computation checks cover 32 heterogeneous transfer cases,
+64 guarded-forcing cases, 256 rewrite-chain cases, and 3072 hoisted forcing
+cases at depths 0 through 5: 3424 cases, in addition to the Bool truth table,
+direct Prop proofs, and general proofs (including all natural iteration counts).
+Nonbottom witnesses and independently failing rewrite conditions rule out
+vacuous examples. The entire audit retains zero sorryAx/choice dependencies.
+-/
+
+namespace Round7
+
+/-- Independent forcing/pullback equivalence, with the original transfer orientation. -/
+theorem after_pullback {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (a : α) (q : β) :
+    ForcesAfter T a q ↔ Forces a (T.pullback q) := by
+  exact T.gc a q
+
+/-- Independent guarded-forcing equivalence. -/
+theorem guard_forcing {α : Type*} [HeytingAlgebra α] (a p g : α) :
+    Forces (a ⊓ g) p ↔ Forces g (synthesizeGuard a p) := by
+  exact blueprint_adjunction a p g
+
+/-- Independent equivalence for two conditions at the same guarded stage. -/
+theorem rewrite_chain {α : Type*} [HeytingAlgebra α] (a p₁ p₂ g : α) :
+    Forces (a ⊓ g) (p₁ ⊓ p₂) ↔ Forces g (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂) := by
+  unfold Forces synthesizeGuard
+  simp only [le_inf_iff, le_himp_iff']
+
+/-- Independent hoisted forcing proof for every natural iteration count. -/
+theorem hoisted_forcing {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    ∀ n : ℕ, ForcesAfter (E.comp (L.iterate n)) (a₀ ⊓ hoistLoopGuard E a₀ inv) target := by
+  exact Round6.hoist_target E L a₀ inv target h
+
+/-- All four Bool forcing judgments, including the one rejected judgment. -/
+theorem bool_forcing_table :
+    Forces false false ∧ Forces false true ∧ Forces true true ∧ ¬ Forces true false := by
+  unfold Forces
+  decide
+
+/-- On Prop, forcing is implication; it is not an assertion of its premise. -/
+theorem prop_forcing (a p : Prop) : Forces a p ↔ (a → p) := by
+  rfl
+
+/-- Direct constructive Prop proof of the guard claim. -/
+theorem prop_guard (a p g : Prop) :
+    Forces (a ⊓ g) p ↔ Forces g (synthesizeGuard a p) := by
+  change ((a ∧ g) → p) ↔ (g → a → p)
+  exact ⟨fun h hg ha => h ⟨ha, hg⟩, fun h hag => h hag.2 hag.1⟩
+
+/-- Direct constructive Prop proof, separately extracting both rewrite conditions. -/
+theorem prop_chain (a p₁ p₂ g : Prop) :
+    Forces (a ⊓ g) (p₁ ⊓ p₂) ↔ Forces g (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂) := by
+  change ((a ∧ g) → p₁ ∧ p₂) ↔ (g → (a → p₁) ∧ (a → p₂))
+  constructor
+  · exact fun h hg => ⟨fun ha => (h ⟨ha, hg⟩).1, fun ha => (h ⟨ha, hg⟩).2⟩
+  · exact fun h hag => ⟨(h hag.2).1 hag.1, (h hag.2).2 hag.1⟩
+
+open Round5
+
+/-- All 32 forcing judgments across the nonconstant Bool²-to-Bool³ entry transfer. -/
+theorem finite_after (a : PreState) (q : HeaderState) :
+    ForcesAfter entry a q ↔ Forces a (entry.pullback q) := by
+  unfold ForcesAfter Forces
+  rcases a with ⟨a₁, a₂⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases a₁ <;> cases a₂ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- All 64 two-coordinate guarded-forcing cases. -/
+theorem finite_guard (a p g : PreState) :
+    Forces (a ⊓ g) p ↔ Forces g (synthesizeGuard a p) := by
+  unfold Forces
+  rcases a with ⟨a₁, a₂⟩
+  rcases p with ⟨p₁, p₂⟩
+  rcases g with ⟨g₁, g₂⟩
+  cases a₁ <;> cases a₂ <;> cases p₁ <;> cases p₂ <;> cases g₁ <;> cases g₂ <;> decide
+
+/-- All 256 two-coordinate stage/condition/condition/guard combinations. -/
+theorem finite_chain (a p₁ p₂ g : PreState) :
+    Forces (a ⊓ g) (p₁ ⊓ p₂) ↔ Forces g (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂) := by
+  unfold Forces
+  rcases a with ⟨a₁, a₂⟩
+  rcases p₁ with ⟨p₁₁, p₁₂⟩
+  rcases p₂ with ⟨p₂₁, p₂₂⟩
+  rcases g with ⟨g₁, g₂⟩
+  cases a₁ <;> cases a₂ <;> cases p₁₁ <;> cases p₁₂ <;>
+    cases p₂₁ <;> cases p₂₂ <;> cases g₁ <;> cases g₂ <;> decide
+
+/-- Both dynamic loops, all preheaders/invariants/targets, and depths 0 through 5. -/
+theorem finite_hoisted_forcing (cyclic : Bool) (a₀ : PreState) (inv target : HeaderState) :
+    IsInductiveFor (Round6.loop cyclic) inv target →
+      Round6.ThroughFive (fun n =>
+        ForcesAfter (entry.comp ((Round6.loop cyclic).iterate n))
+          (a₀ ⊓ hoistLoopGuard entry a₀ inv) target) := by
+  unfold IsInductiveFor IsLoopInvariant Round6.ThroughFive ForcesAfter Forces
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  rcases target with ⟨t₁, t₂, t₃⟩
+  cases cyclic <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;>
+    cases i₃ <;> cases t₁ <;> cases t₂ <;> cases t₃ <;> decide
+
+/-- Using post in place of pullback, or ignoring the transfer, changes the answer. -/
+theorem transfer_orientation_witness :
+    let T := Round4.loop true
+    let a : HeaderState := (true, false, false)
+    let q : HeaderState := (false, true, false)
+    ForcesAfter T a q ∧ Forces a (T.pullback q) ∧
+      ¬ Forces a (T.post q) ∧ ¬ Forces a q := by
+  dsimp only
+  unfold ForcesAfter Forces
+  decide
+
+/-- Distinct proper preconditions share a nonbottom satisfying guarded stage. -/
+theorem rewrite_active_witness :
+    let a : HeaderState := (true, true, true)
+    let p₁ : HeaderState := (true, true, false)
+    let p₂ : HeaderState := (true, false, true)
+    let g : HeaderState := (true, false, false)
+    Forces (a ⊓ g) (p₁ ⊓ p₂) ∧
+      Forces g (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂) ∧
+      ¬ Forces a (p₁ ⊓ p₂) := by
+  dsimp only
+  unfold Forces
+  decide
+
+/-- Each rewrite condition can fail while the other holds. -/
+theorem rewrite_conditions_independent :
+    (Forces (false, true, false) (true, true, false) ∧
+      ¬ Forces (false, true, false) (true, false, true)) ∧
+    (¬ Forces (false, false, true) (true, true, false) ∧
+      Forces (false, false, true) (true, false, true)) := by
+  unfold Forces
+  decide
+
+/-- Replacing either meet by join accepts a guard that fails the conjunction. -/
+theorem rewrite_join_counterexample :
+    let a : HeaderState := (true, true, true)
+    let p₁ : HeaderState := (true, true, false)
+    let p₂ : HeaderState := (true, false, true)
+    let g : HeaderState := (false, true, false)
+    Forces g (synthesizeGuard a p₁ ⊔ synthesizeGuard a p₂) ∧
+      Forces (a ⊓ g) (p₁ ⊔ p₂) ∧ ¬ Forces (a ⊓ g) (p₁ ⊓ p₂) := by
+  dsimp only
+  unfold Forces
+  decide
+
+/-- The theorem does not promise that a state-changing first rewrite preserves
+the second precondition. Both hold initially, but cycling the stage breaks p₂. -/
+theorem same_stage_is_not_sequential :
+    Forces (true, false, false) ((true, true, false) ⊓ (true, false, true)) ∧
+    ¬ ForcesAfter (Round4.loop true) (true, false, false) (true, false, true) := by
+  unfold ForcesAfter Forces
+  decide
+
+/-- A proper inductive witness succeeds in entry-then-loop order, but not in reverse. -/
+theorem hoist_composition_order :
+    let E := Round4.loop true
+    let L := Round4.loop false
+    let inv : HeaderState := (false, true, false)
+    let a₀ : HeaderState := (true, true, true)
+    let g := hoistLoopGuard E a₀ inv
+    IsInductiveFor L inv inv ∧ g = (true, false, false) ∧
+    ForcesAfter (E.comp (L.iterate 1)) (a₀ ⊓ g) inv ∧
+    ¬ ForcesAfter ((L.iterate 1).comp E) (a₀ ⊓ g) inv := by
+  dsimp only
+  unfold IsInductiveFor IsLoopInvariant ForcesAfter Forces
+  decide
+
+/-- The same nonbottom guarded stage forces the proper target at every depth. -/
+theorem hoisted_forcing_all_steps :
+    ∀ n : ℕ, ForcesAfter ((Round4.loop true).comp ((Round4.loop false).iterate n))
+      ((true, true, true) ⊓
+        hoistLoopGuard (Round4.loop true) (true, true, true) (false, true, false))
+      (false, true, false) := by
+  exact hoisted_forcing (Round4.loop true) (Round4.loop false) (true, true, true)
+    (false, true, false) (false, true, false)
+    (by unfold IsInductiveFor IsLoopInvariant; decide)
+
+/-- Without inductivity, the forcing claim can pass at depths 0 and 1 but fail at 2. -/
+theorem delayed_forcing_failure :
+    let inv : HeaderState := (true, true, false)
+    let guarded := (true, true) ⊓ hoistLoopGuard entry (true, true) inv
+    ¬ IsInductiveFor Round6.shift inv inv ∧
+    ForcesAfter (entry.comp (Round6.shift.iterate 0)) guarded inv ∧
+    ForcesAfter (entry.comp (Round6.shift.iterate 1)) guarded inv ∧
+    ¬ ForcesAfter (entry.comp (Round6.shift.iterate 2)) guarded inv := by
+  dsimp only
+  unfold IsInductiveFor IsLoopInvariant ForcesAfter Forces
+  decide
+
+end Round7
 
 end CatSem.RedTeam

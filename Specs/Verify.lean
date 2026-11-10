@@ -128,6 +128,26 @@ example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
     ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) ≤ target :=
   CatSem.hoistLoopGuard_iterate_target E L a₀ inv target h
 
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (a : α) (q : β) :
+    CatSem.ForcesAfter T a q ↔ CatSem.Forces a (T.pullback q) :=
+  CatSem.forcesAfter_iff_pullback T a q
+
+example {α : Type*} [HeytingAlgebra α] (a p g : α) :
+    CatSem.Forces (a ⊓ g) p ↔ CatSem.Forces g (CatSem.synthesizeGuard a p) :=
+  CatSem.forces_guard_iff a p g
+
+example {α : Type*} [HeytingAlgebra α] (a p₁ p₂ g : α) :
+    CatSem.Forces (a ⊓ g) (p₁ ⊓ p₂) ↔
+      CatSem.Forces g (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂) :=
+  CatSem.forces_rewrite_chain_iff a p₁ p₂ g
+
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CatSem.CFGTransfer α β) (L : CatSem.CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : CatSem.IsInductiveFor L inv target) :
+    ∀ n : ℕ, CatSem.ForcesAfter (E.comp (L.iterate n)) (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv) target :=
+  CatSem.forcesAfter_hoistLoopGuard_iterate E L a₀ inv target h
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -150,5 +170,9 @@ example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
 #print axioms CatSem.isLoopInvariant_iterate_pullback
 #print axioms CatSem.hoistLoopGuard_iterate_invariant
 #print axioms CatSem.hoistLoopGuard_iterate_target
+#print axioms CatSem.forcesAfter_iff_pullback
+#print axioms CatSem.forces_guard_iff
+#print axioms CatSem.forces_rewrite_chain_iff
+#print axioms CatSem.forcesAfter_hoistLoopGuard_iterate
 
 end CatSem.Verify

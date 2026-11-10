@@ -172,6 +172,35 @@
         "hoistLoopGuard_entry_target"
       ],
       "informal_claim": "If IsInductiveFor L inv target, the hoisted preheader guard guarantees target holds after entering the loop and running n iterations: forall n : Nat, (L.iterate n).post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= target."
+    },
+    {
+      "id": "forcesAfter_iff_pullback",
+      "status": "spec_locked",
+      "informal_claim": "Across any CFGTransfer T, ForcesAfter T a q iff Forces a (T.pullback q)."
+    },
+    {
+      "id": "forces_guard_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuard_adjunction"
+      ],
+      "informal_claim": "At stage a, a guarded stage a meet g forces p iff g forces the synthesized guard (Forces (a meet g) p iff Forces g (synthesizeGuard a p))."
+    },
+    {
+      "id": "forces_rewrite_chain_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "forces_guard_iff"
+      ],
+      "informal_claim": "For two conditional rewrite preconditions p1 and p2, Forces (a meet g) (p1 meet p2) iff Forces g (synthesizeGuard a p1 meet synthesizeGuard a p2)."
+    },
+    {
+      "id": "forcesAfter_hoistLoopGuard_iterate",
+      "status": "spec_locked",
+      "depends_on": [
+        "hoistLoopGuard_iterate_target"
+      ],
+      "informal_claim": "If IsInductiveFor L inv target, then for every iteration count n : Nat, the guarded preheader stage forces target along the composed morphism E.comp (L.iterate n)."
     }
   ]
 }

@@ -98,6 +98,24 @@ example : ((CFGTransfer.id Prop).iterate 0).post True := by
   simp [CFGTransfer.iterate, CFGTransfer.id]
 
 example : ¬ synthesizeEdgeGuard ((CFGTransfer.id Prop).iterate 2) True False := by
-  simp [CFGTransfer.iterate, CFGTransfer.comp, CFGTransfer.id, synthesizeEdgeGuard, synthesizeGuard]
+    simp [CFGTransfer.iterate, CFGTransfer.comp, CFGTransfer.id, synthesizeEdgeGuard, synthesizeGuard]
+
+/-- Kripke-Joyal forcing relation at a CFG stage `stage : α`:
+    `stage` forces `prop` (`stage ⊩ prop`) when `stage ≤ prop` in the Heyting fiber. -/
+def Forces {α : Type*} [HeytingAlgebra α] (stage prop : α) : Prop :=
+  stage ≤ prop
+
+/-- Kripke-Joyal forcing across a CFG morphism `T : CFGTransfer α β`:
+    `stage` forces `prop` after `T` when the forward existential postcondition `T.post stage` forces `prop`. -/
+def ForcesAfter {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (stage : α) (prop : β) : Prop :=
+  Forces (T.post stage) prop
+
+-- Sanity checks on Kripke-Joyal forcing over Prop
+example : Forces False True := by
+  simp [Forces]
+
+example : ForcesAfter (CFGTransfer.id Prop) True True := by
+  simp [ForcesAfter, Forces, CFGTransfer.id]
 
 end CatSem

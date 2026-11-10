@@ -148,4 +148,30 @@ theorem hoistLoopGuard_iterate_target (E : CFGTransfer α β) (L : CFGTransfer �
     ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
   sorry
 
+/-- Kripke-Joyal Forcing Adjunction: Across any `T : CFGTransfer α β`,
+    `a` forces `q` after `T` if and only if `a` locally forces the pullback `T.pullback q`. -/
+theorem forcesAfter_iff_pullback (T : CFGTransfer α β) (a : α) (q : β) :
+    ForcesAfter T a q ↔ Forces a (T.pullback q) := by
+  sorry
+
+/-- Kripke-Joyal Implication Forcing: At stage `a`, a guarded stage `a ⊓ g` forces `p`
+    if and only if `g` forces the synthesized guard `synthesizeGuard a p`. -/
+theorem forces_guard_iff (a p g : α) :
+    Forces (a ⊓ g) p ↔ Forces g (synthesizeGuard a p) := by
+  sorry
+
+/-- Kripke-Joyal Rewrite-Chain Forcing: For two conditional rewrite preconditions `p₁ p₂ : α`,
+    a guarded stage `a ⊓ g` forces `p₁ ⊓ p₂` if and only if `g` forces the meet of their synthesized guards. -/
+theorem forces_rewrite_chain_iff (a p₁ p₂ g : α) :
+    Forces (a ⊓ g) (p₁ ⊓ p₂) ↔ Forces g (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂) := by
+  sorry
+
+/-- Kripke-Joyal Hoisted Loop Forcing: If `IsInductiveFor L inv target`, then for every
+    iteration count `n : ℕ`, the guarded preheader stage forces `target` along the composed
+    morphism `E.comp (L.iterate n)`. -/
+theorem forcesAfter_hoistLoopGuard_iterate (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    ∀ n : ℕ, ForcesAfter (E.comp (L.iterate n)) (a₀ ⊓ hoistLoopGuard E a₀ inv) target := by
+  sorry
+
 end CatSem
