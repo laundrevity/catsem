@@ -14,4 +14,9 @@ theorem synthesizeGuard_weakest (a b g : α) (h : a ⊓ g ≤ b) :
     g ≤ synthesizeGuard a b := by
   sorry
 
+/-- Heyting Adjunction: Conjoining `a` with `g` establishes `b` if and only if `g` implies `synthesizeGuard a b`. -/
+theorem synthesizeGuard_adjunction (a b g : α) :
+    a ⊓ g ≤ b ↔ g ≤ synthesizeGuard a b := by
+  sorry
+
 end CatSem

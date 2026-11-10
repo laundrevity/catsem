@@ -12,7 +12,12 @@ example {α : Type*} [HeytingAlgebra α] (a b g : α) (h : a ⊓ g ≤ b) :
     g ≤ CatSem.synthesizeGuard a b :=
   CatSem.synthesizeGuard_weakest a b g h
 
+example {α : Type*} [HeytingAlgebra α] (a b g : α) :
+    a ⊓ g ≤ b ↔ g ≤ CatSem.synthesizeGuard a b :=
+  CatSem.synthesizeGuard_adjunction a b g
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
+#print axioms CatSem.synthesizeGuard_adjunction
 
 end CatSem.Verify
