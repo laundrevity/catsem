@@ -51,4 +51,21 @@ example :
     synthesizeEdgeGuard ((CFGTransfer.id Prop).comp (CFGTransfer.id Prop)) False False := by
   simp [synthesizeEdgeGuard, CFGTransfer.comp, CFGTransfer.id, synthesizeGuard]
 
+/-- A predicate `inv` is a forward loop invariant for a self-transfer `L : CFGTransfer α α`
+    when its forward postcondition implies `inv`. -/
+def IsLoopInvariant {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) (inv : α) : Prop :=
+  L.post inv ≤ inv
+
+/-- Abductive loop-step guard synthesis: synthesizes the weakest local guard on the loop header
+    such that conjoining `inv` with the guard re-establishes `inv` across `L`. -/
+def synthesizeLoopStepGuard {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) (inv : α) : α :=
+  synthesizeEdgeGuard L inv inv
+
+-- Sanity checks on loop invariance and abductive loop-step guard over Prop
+example : IsLoopInvariant (CFGTransfer.id Prop) True := by
+  simp [IsLoopInvariant, CFGTransfer.id]
+
+example : synthesizeLoopStepGuard (CFGTransfer.id Prop) True := by
+  simp [synthesizeLoopStepGuard, synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
+
 end CatSem

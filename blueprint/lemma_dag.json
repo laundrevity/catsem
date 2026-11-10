@@ -72,6 +72,37 @@
         "synthesizeBranchGuard_iff"
       ],
       "informal_claim": "Given two converging CFG paths P1, P2 : CFGTransfer alpha gamma, P1.post (a meet g) join P2.post (a meet g) <= c iff g <= synthesizeEdgeGuard P1 a c meet synthesizeEdgeGuard P2 a c."
+    },
+    {
+      "id": "isLoopInvariant_iff_le_pullback",
+      "status": "spec_locked",
+      "informal_claim": "A predicate inv is a forward loop invariant (L.post inv <= inv) iff it is Kripke-Joyal stable under back-edge pullback (inv <= L.pullback inv)."
+    },
+    {
+      "id": "isLoopInvariant_iff_guard_eq_top",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iff_le_pullback",
+        "synthesizeGuard_adjunction"
+      ],
+      "informal_claim": "IsLoopInvariant L inv holds iff the abductive loop-step guard is trivial (synthesizeLoopStepGuard L inv = top)."
+    },
+    {
+      "id": "synthesizeLoopStepGuard_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeEdgeGuard_sound"
+      ],
+      "informal_claim": "Conjoining any candidate invariant inv with its abductive loop-step guard guarantees the invariant holds after executing the loop body: L.post (inv meet synthesizeLoopStepGuard L inv) <= inv."
+    },
+    {
+      "id": "isLoopInvariant_inf",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iff_le_pullback",
+        "pullback_map_inf"
+      ],
+      "informal_claim": "If inv1 and inv2 are both loop invariants for L, their conjunction inv1 meet inv2 is also a loop invariant."
     }
   ]
 }

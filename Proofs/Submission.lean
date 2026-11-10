@@ -52,7 +52,9 @@ theorem synthesizeBranchGuard_iff (T₁ : CFGTransfer α β₁) (T₂ : CFGTrans
 /-- Meet Preservation: Every `T : CFGTransfer α β` preserves binary meets on pullbacks. -/
 theorem pullback_map_inf (T : CFGTransfer α β) (b₁ b₂ : β) :
     T.pullback (b₁ ⊓ b₂) = T.pullback b₁ ⊓ T.pullback b₂ := by
-  exact T.gc.u_inf
+  apply le_antisymm
+  · exact le_inf (T.gc.monotone_u inf_le_left) (T.gc.monotone_u inf_le_right)
+  · exact T.gc.le_u (le_inf (T.gc.l_le inf_le_left) (T.gc.l_le inf_le_right))
 
 /-- Path Composition: Guard synthesis across a composed path `T₁.comp T₂` equals
     nested stage-by-stage guard synthesis. -/
@@ -77,5 +79,33 @@ theorem synthesizeDiamondGuard_iff (P₁ P₂ : CFGTransfer α γ) (a : α) (c :
       g ≤ synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c := by
   rw [sup_le_iff]
   exact synthesizeBranchGuard_iff P₁ P₂ a c c g
+
+/-- Kripke-Joyal Loop Stability: A predicate `inv` is a forward loop invariant
+    if and only if it is Kripke-Joyal stable under back-edge pullback (`inv ≤ L.pullback inv`). -/
+theorem isLoopInvariant_iff_le_pullback (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ inv ≤ L.pullback inv := by
+  unfold IsLoopInvariant
+  exact L.gc.le_iff_le
+
+/-- Trivial Abductive Guard Characterization: `IsLoopInvariant L inv` holds if and only if
+    the abductive loop-step guard is trivial (`synthesizeLoopStepGuard L inv = ⊤`). -/
+theorem isLoopInvariant_iff_guard_eq_top (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ synthesizeLoopStepGuard L inv = ⊤ := by
+  unfold synthesizeLoopStepGuard synthesizeEdgeGuard synthesizeGuard
+  exact (isLoopInvariant_iff_le_pullback L inv).trans himp_eq_top_iff.symm
+
+/-- Loop-Step Guard Soundness: Conjoining any candidate invariant `inv` with its abductive
+    loop-step guard guarantees the invariant holds after executing the loop body. -/
+theorem synthesizeLoopStepGuard_sound (L : CFGTransfer α α) (inv : α) :
+    L.post (inv ⊓ synthesizeLoopStepGuard L inv) ≤ inv := by
+  unfold synthesizeLoopStepGuard
+  exact synthesizeEdgeGuard_sound L inv inv
+
+/-- Conjunctive Loop Invariance: If `inv₁` and `inv₂` are both loop invariants for `L`,
+    their conjunction `inv₁ ⊓ inv₂` is also a loop invariant. -/
+theorem isLoopInvariant_inf (L : CFGTransfer α α) (inv₁ inv₂ : α) :
+    IsLoopInvariant L inv₁ → IsLoopInvariant L inv₂ → IsLoopInvariant L (inv₁ ⊓ inv₂) := by
+  intro h₁ h₂
+  exact le_inf ((L.gc.monotone_l inf_le_left).trans h₁) ((L.gc.monotone_l inf_le_right).trans h₂)
 
 end CatSem

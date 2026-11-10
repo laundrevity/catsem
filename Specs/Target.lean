@@ -68,4 +68,28 @@ theorem synthesizeDiamondGuard_iff (P₁ P₂ : CFGTransfer α γ) (a : α) (c :
       g ≤ synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c := by
   sorry
 
+/-- Kripke-Joyal Loop Stability: A predicate `inv` is a forward loop invariant
+    if and only if it is Kripke-Joyal stable under back-edge pullback (`inv ≤ L.pullback inv`). -/
+theorem isLoopInvariant_iff_le_pullback (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ inv ≤ L.pullback inv := by
+  sorry
+
+/-- Trivial Abductive Guard Characterization: `IsLoopInvariant L inv` holds if and only if
+    the abductive loop-step guard is trivial (`synthesizeLoopStepGuard L inv = ⊤`). -/
+theorem isLoopInvariant_iff_guard_eq_top (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ synthesizeLoopStepGuard L inv = ⊤ := by
+  sorry
+
+/-- Loop-Step Guard Soundness: Conjoining any candidate invariant `inv` with its abductive
+    loop-step guard guarantees the invariant holds after executing the loop body. -/
+theorem synthesizeLoopStepGuard_sound (L : CFGTransfer α α) (inv : α) :
+    L.post (inv ⊓ synthesizeLoopStepGuard L inv) ≤ inv := by
+  sorry
+
+/-- Conjunctive Loop Invariance: If `inv₁` and `inv₂` are both loop invariants for `L`,
+    their conjunction `inv₁ ⊓ inv₂` is also a loop invariant. -/
+theorem isLoopInvariant_inf (L : CFGTransfer α α) (inv₁ inv₂ : α) :
+    IsLoopInvariant L inv₁ → IsLoopInvariant L inv₂ → IsLoopInvariant L (inv₁ ⊓ inv₂) := by
+  sorry
+
 end CatSem

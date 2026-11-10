@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 3 match their blueprint claims after unfolding
+The target statements through Round 4 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All ten declarations in `Specs.Target` currently have placeholder proofs. None
+All fourteen declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. Axiom inspection
@@ -469,5 +469,190 @@ theorem diamond_operator_counterexamples :
   decide
 
 end Round3
+
+/-!
+## Round 4: loop preservation and one-step guards
+
+Both definitions and all four new theorem statements match the blueprint.
+`IsLoopInvariant L inv` is the preservation condition `L.post inv ≤ inv`;
+the adjunction gives exactly `inv ≤ L.pullback inv`. The loop-step guard is
+`inv ⇨ L.pullback inv`, which equals top exactly when preservation holds.
+Soundness does not assume that the candidate is already invariant. Closure
+under meet requires both candidates to be invariant and follows even from
+monotonicity of `post`; it does not require `post` to preserve meets.
+
+Scope: preservation alone does not establish an initial state, termination,
+or Kripke-Joyal forcing semantics. One-step soundness restores `inv`, not
+necessarily `inv ⊓ guard`. The cycle counterexample below shows that an
+initial guard check alone need not keep later unguarded iterations in `inv`.
+
+The two nonidentity, nonconstant loops use the eight-element algebra Bool³.
+The growth loop has post `(x, x || y, z)` and pullback `(x && y, y, z)`.
+The cycle loop has post `(z, x, y)` and inverse pullback `(y, z, x)`.
+Each of the first three targets is checked on all 16 loop/candidate choices;
+meet closure is checked on all 128 loop/candidate/candidate choices. The
+explicit meet witness uses distinct proper invariants with a nonbottom meet.
+All proofs are independent of the target placeholders.
+-/
+
+namespace Round4
+
+/-- Independent proof of forward/backward loop stability. -/
+theorem invariant_pullback {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ inv ≤ L.pullback inv := by
+  exact L.gc inv inv
+
+/-- Independent proof of the unrestricted-guard characterization. -/
+theorem invariant_guard_top {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) :
+    IsLoopInvariant L inv ↔ synthesizeLoopStepGuard L inv = ⊤ := by
+  exact (L.gc inv inv).trans himp_eq_top_iff.symm
+
+/-- Independent soundness proof for every candidate, including non-invariants. -/
+theorem loop_sound {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) :
+    L.post (inv ⊓ synthesizeLoopStepGuard L inv) ≤ inv := by
+  exact (L.gc _ _).mpr (le_himp_iff'.mp le_rfl)
+
+/-- Independent meet-closure proof using monotonicity of the forward map. -/
+theorem invariant_meet {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv₁ inv₂ : α) :
+    IsLoopInvariant L inv₁ → IsLoopInvariant L inv₂ →
+      IsLoopInvariant L (inv₁ ⊓ inv₂) := by
+  intro h₁ h₂
+  exact le_inf ((L.gc.monotone_l inf_le_left).trans h₁)
+    ((L.gc.monotone_l inf_le_right).trans h₂)
+
+/-- Also check the definition's claim that the synthesized one-step guard is weakest. -/
+theorem loop_guard_adjunction {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv g : α) :
+    L.post (inv ⊓ g) ≤ inv ↔ g ≤ synthesizeLoopStepGuard L inv := by
+  exact Round2.edge_adjunction L inv inv g
+
+/-- Three independent Boolean coordinates give nontrivial partial repairs. -/
+abbrev State := Bool × Bool × Bool
+
+/-- `true` selects the cycle loop; `false` selects the growth loop. -/
+def loop (cycle : Bool) : CFGTransfer State State where
+  post x := if cycle then (x.2.2, x.1, x.2.1) else (x.1, x.1 || x.2.1, x.2.2)
+  pullback b := if cycle then (b.2.1, b.2.2, b.1) else (b.1 && b.2.1, b.2.1, b.2.2)
+  gc := by
+    rintro ⟨x₁, x₂, x₃⟩ ⟨b₁, b₂, b₃⟩
+    cases cycle <;> cases x₁ <;> cases x₂ <;> cases x₃ <;>
+      cases b₁ <;> cases b₂ <;> cases b₃ <;> decide
+
+/-- Both loop maps differ from the identity at the same concrete input. -/
+theorem loop_nonidentity (cycle : Bool) :
+    (loop cycle).post (true, false, false) ≠ (true, false, false) ∧
+    (loop cycle).pullback (true, false, false) ≠ (true, false, false) := by
+  cases cycle <;> decide
+
+/-- Neither forward nor backward loop map collapses to a constant. -/
+theorem loop_nonconstant (cycle : Bool) :
+    (loop cycle).post (false, false, false) ≠ (loop cycle).post (true, true, true) ∧
+    (loop cycle).pullback (false, false, false) ≠ (loop cycle).pullback (true, true, true) := by
+  cases cycle <;> decide
+
+/-- Exhaustive forward/backward stability check on both loops. -/
+theorem finite_invariant_pullback (cycle : Bool) (inv : State) :
+    IsLoopInvariant (loop cycle) inv ↔ inv ≤ (loop cycle).pullback inv := by
+  unfold IsLoopInvariant
+  rcases inv with ⟨x, y, z⟩
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Exhaustive check of both directions, including non-invariant candidates. -/
+theorem finite_guard_top (cycle : Bool) (inv : State) :
+    IsLoopInvariant (loop cycle) inv ↔ synthesizeLoopStepGuard (loop cycle) inv = ⊤ := by
+  unfold IsLoopInvariant
+  rcases inv with ⟨x, y, z⟩
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Exhaustive one-step soundness, without assuming invariance. -/
+theorem finite_loop_sound (cycle : Bool) (inv : State) :
+    (loop cycle).post (inv ⊓ synthesizeLoopStepGuard (loop cycle) inv) ≤ inv := by
+  rcases inv with ⟨x, y, z⟩
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Exhaustive meet closure, preserving both premises of the target. -/
+theorem finite_invariant_meet (cycle : Bool) (inv₁ inv₂ : State) :
+    IsLoopInvariant (loop cycle) inv₁ → IsLoopInvariant (loop cycle) inv₂ →
+      IsLoopInvariant (loop cycle) (inv₁ ⊓ inv₂) := by
+  unfold IsLoopInvariant
+  rcases inv₁ with ⟨x₁, y₁, z₁⟩
+  rcases inv₂ with ⟨x₂, y₂, z₂⟩
+  cases cycle <;> cases x₁ <;> cases y₁ <;> cases z₁ <;>
+    cases x₂ <;> cases y₂ <;> cases z₂ <;> decide
+
+/-- Complete classification: the cycle fixes equal bits; growth requires x ≤ y. -/
+theorem invariant_truth_table (cycle x y z : Bool) :
+    IsLoopInvariant (loop cycle) (x, y, z) ↔
+      if cycle then x = y ∧ y = z else x ≤ y := by
+  unfold IsLoopInvariant
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Complete loop-step guard table on all candidates. -/
+theorem guard_truth_table (cycle x y z : Bool) :
+    synthesizeLoopStepGuard (loop cycle) (x, y, z) =
+      if cycle then (!x || y, !y || z, !z || x) else (!x || y, true, true) := by
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Distinct proper growth invariants have a proper, nonbottom invariant meet. -/
+theorem growth_meet_witness :
+    IsLoopInvariant (loop false) (true, true, false) ∧
+    IsLoopInvariant (loop false) (false, true, true) ∧
+    ((true, true, false) ⊓ (false, true, true) : State) = (false, true, false) ∧
+    IsLoopInvariant (loop false) (false, true, false) := by
+  unfold IsLoopInvariant
+  decide
+
+/-- The guard repairs a genuine failure while retaining a nonbottom state. -/
+theorem growth_repair_witness :
+    ¬ IsLoopInvariant (loop false) (true, false, true) ∧
+    synthesizeLoopStepGuard (loop false) (true, false, true) = (false, true, true) ∧
+    (true, false, true) ⊓ synthesizeLoopStepGuard (loop false) (true, false, true) =
+      (false, false, true) ∧
+    (loop false).post (false, false, true) = (false, false, true) := by
+  unfold IsLoopInvariant
+  decide
+
+/-- Either missing invariance premise can make the conjunction non-invariant. -/
+theorem meet_requires_both_premises :
+    IsLoopInvariant (loop false) (true, true, true) ∧
+    ¬ IsLoopInvariant (loop false) (true, false, true) ∧
+    ¬ IsLoopInvariant (loop false) ((true, true, true) ⊓ (true, false, true)) ∧
+    ¬ IsLoopInvariant (loop false) ((true, false, true) ⊓ (true, true, true)) := by
+  unfold IsLoopInvariant
+  decide
+
+/-- The cycle guard is restrictive and leaves a nonbottom starting state. -/
+theorem cycle_repair_witness :
+    ¬ IsLoopInvariant (loop true) (true, true, false) ∧
+    synthesizeLoopStepGuard (loop true) (true, true, false) = (true, false, true) ∧
+    (true, true, false) ⊓ synthesizeLoopStepGuard (loop true) (true, true, false) =
+      (true, false, false) := by
+  unfold IsLoopInvariant
+  decide
+
+/-- Restoring inv once does not ensure the guard persists or allow another
+unguarded step. This refutes a stronger interpretation, not the target. -/
+theorem one_step_not_persistent :
+    let L := loop true
+    let inv : State := (true, true, false)
+    let guarded := inv ⊓ synthesizeLoopStepGuard L inv
+    L.post guarded ≤ inv ∧ ¬ IsLoopInvariant L guarded ∧
+      ¬ (L.post (L.post guarded) ≤ inv) := by
+  dsimp only
+  unfold IsLoopInvariant
+  decide
+
+/-- Invariance requires a forward inclusion, not equality with the post-state. -/
+theorem invariance_need_not_be_fixedpoint :
+    IsLoopInvariant (Round2.keepCoordinate true) (false, true) ∧
+    (Round2.keepCoordinate true).post (false, true) ≠ (false, true) := by
+  unfold IsLoopInvariant
+  decide
+
+end Round4
 
 end CatSem.RedTeam

@@ -58,6 +58,28 @@ example {α γ : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
       g ≤ CatSem.synthesizeEdgeGuard P₁ a c ⊓ CatSem.synthesizeEdgeGuard P₂ a c :=
   CatSem.synthesizeDiamondGuard_iff P₁ P₂ a c g
 
+example {α : Type*} [HeytingAlgebra α]
+    (L : CatSem.CFGTransfer α α) (inv : α) :
+    CatSem.IsLoopInvariant L inv ↔ inv ≤ L.pullback inv :=
+  CatSem.isLoopInvariant_iff_le_pullback L inv
+
+example {α : Type*} [HeytingAlgebra α]
+    (L : CatSem.CFGTransfer α α) (inv : α) :
+    CatSem.IsLoopInvariant L inv ↔ CatSem.synthesizeLoopStepGuard L inv = ⊤ :=
+  CatSem.isLoopInvariant_iff_guard_eq_top L inv
+
+example {α : Type*} [HeytingAlgebra α]
+    (L : CatSem.CFGTransfer α α) (inv : α) :
+    L.post (inv ⊓ CatSem.synthesizeLoopStepGuard L inv) ≤ inv :=
+  CatSem.synthesizeLoopStepGuard_sound L inv
+
+example {α : Type*} [HeytingAlgebra α]
+    (L : CatSem.CFGTransfer α α) (inv₁ inv₂ : α) :
+    CatSem.IsLoopInvariant L inv₁ →
+      CatSem.IsLoopInvariant L inv₂ →
+      CatSem.IsLoopInvariant L (inv₁ ⊓ inv₂) :=
+  CatSem.isLoopInvariant_inf L inv₁ inv₂
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -68,5 +90,9 @@ example {α γ : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
 #print axioms CatSem.synthesizeEdgeGuard_comp
 #print axioms CatSem.synthesizeEdgeGuard_map_inf
 #print axioms CatSem.synthesizeDiamondGuard_iff
+#print axioms CatSem.isLoopInvariant_iff_le_pullback
+#print axioms CatSem.isLoopInvariant_iff_guard_eq_top
+#print axioms CatSem.synthesizeLoopStepGuard_sound
+#print axioms CatSem.isLoopInvariant_inf
 
 end CatSem.Verify
