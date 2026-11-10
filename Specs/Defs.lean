@@ -87,4 +87,17 @@ example : IsInductiveFor (CFGTransfer.id Prop) False True := by
 example : ¬ hoistLoopGuard (CFGTransfer.id Prop) True False := by
   simp [hoistLoopGuard, synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
 
+/-- `n`-fold loop iteration of a self-transfer `L : CFGTransfer α α`. -/
+def CFGTransfer.iterate {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) :
+    ℕ → CFGTransfer α α
+  | 0 => CFGTransfer.id α
+  | n + 1 => (CFGTransfer.iterate L n).comp L
+
+-- Sanity checks on n-fold loop iteration over Prop
+example : ((CFGTransfer.id Prop).iterate 0).post True := by
+  simp [CFGTransfer.iterate, CFGTransfer.id]
+
+example : ¬ synthesizeEdgeGuard ((CFGTransfer.id Prop).iterate 2) True False := by
+  simp [CFGTransfer.iterate, CFGTransfer.comp, CFGTransfer.id, synthesizeEdgeGuard, synthesizeGuard]
+
 end CatSem

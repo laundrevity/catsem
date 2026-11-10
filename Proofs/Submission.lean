@@ -139,4 +139,48 @@ theorem hoistLoopGuard_step_target (E : CFGTransfer α β) (L : CFGTransfer β �
     L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
   exact (hoistLoopGuard_step_invariant E L a₀ inv h.1).trans h.2
 
+/-- Arbitrary-Iteration Loop Invariance: If `IsLoopInvariant L inv`, then `inv` is preserved
+    across any number of loop iterations (`∀ n : ℕ, (L.iterate n).post inv ≤ inv`). -/
+theorem isLoopInvariant_iterate (L : CFGTransfer α α) (inv : α)
+    (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, (L.iterate n).post inv ≤ inv := by
+  intro n
+  induction n with
+  | zero => exact le_rfl
+  | succ n ih =>
+    show L.post ((L.iterate n).post inv) ≤ inv
+    exact (L.gc.monotone_l ih).trans h
+
+/-- Arbitrary-Iteration Kripke-Joyal Pullback Stability: If `IsLoopInvariant L inv`, then `inv`
+    is Kripke-Joyal stable under pullback along any `n`-fold loop path (`∀ n : ℕ, inv ≤ (L.iterate n).pullback inv`). -/
+theorem isLoopInvariant_iterate_pullback (L : CFGTransfer α α) (inv : α)
+    (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, inv ≤ (L.iterate n).pullback inv := by
+  intro n
+  induction n with
+  | zero => exact le_rfl
+  | succ n ih =>
+    show inv ≤ (L.iterate n).pullback (L.pullback inv)
+    exact ih.trans ((L.iterate n).gc.monotone_u (L.gc.le_u h))
+
+/-- Hoisted Guard Arbitrary-Iteration Invariance: If `IsLoopInvariant L inv`, the single
+    preheader guard `hoistLoopGuard E a₀ inv` preserves `inv` after entering the loop and running `n` iterations. -/
+theorem hoistLoopGuard_iterate_invariant (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ inv := by
+  intro n
+  induction n with
+  | zero => exact synthesizeEdgeGuard_sound E a₀ inv
+  | succ n ih =>
+    show L.post ((L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv))) ≤ inv
+    exact (L.gc.monotone_l ih).trans h
+
+/-- Hoisted Guard Arbitrary-Iteration Target Soundness: If `IsInductiveFor L inv target`,
+    the hoisted preheader guard guarantees `target` holds after entering the loop and running `n` iterations. -/
+theorem hoistLoopGuard_iterate_target (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
+  intro n
+  exact (hoistLoopGuard_iterate_invariant E L a₀ inv h.1 n).trans h.2
+
 end CatSem

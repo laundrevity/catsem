@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 5 match their blueprint claims after unfolding
+The target statements through Round 6 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All eighteen declarations in `Specs.Target` currently have placeholder proofs. None
+All twenty-two declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -853,5 +853,204 @@ theorem target_guard_can_be_weaker :
   decide
 
 end Round5
+
+/-!
+## Round 6: arbitrary finite iteration
+
+`CFGTransfer.iterate` starts at identity and appends one loop step in its
+successor clause. Thus the forward map is `L.post ∘ post_n`, while the
+pullback is `pullback_n ∘ L.pullback`. All four new statements match the
+blueprint, including `n = 0`. In the hoisted claims, zero counts loop steps
+only: the entry edge has already run. Induction proves safety for every
+finite iteration count; this does not prove termination or a full forcing
+semantics. The same preheader guard is used once, with no repeated guard
+test in the iterated transfer.
+
+The general proofs below cover every natural number independently of the
+target placeholders. Separate computation checks use all depths 0 through
+5, the three-coordinate cycle, and a shift loop whose post is `(false,x,y)`
+and whose pullback is `(v,w,true)`. These cover 96 forward-invariance cases,
+96 pullback cases, 384 hoisted-invariance cases, and 3072 hoisted-target
+cases: 3648 bounded checks, in addition to the unbounded induction proofs.
+Exact traces detect off-by-one errors and distinguish forward traversal
+from pullback. A delayed-failure witness passes at entry and after one
+step, fails after two, and passes again after three, showing why shallow
+checks cannot substitute for an inductive invariant.
+-/
+
+namespace Round6
+
+/-- Zero iterations are exactly the identity transfer. -/
+theorem iterate_zero {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) :
+    L.iterate 0 = CFGTransfer.id α := by
+  rfl
+
+/-- One iteration is exactly the original transfer, including its proof field. -/
+theorem iterate_one {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) :
+    L.iterate 1 = L := by
+  cases L
+  rfl
+
+/-- Successor iteration runs the loop last forward and first backward. -/
+theorem successor_maps {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) (n : ℕ) :
+    (L.iterate (n + 1)).post = L.post ∘ (L.iterate n).post ∧
+    (L.iterate (n + 1)).pullback = (L.iterate n).pullback ∘ L.pullback := by
+  exact ⟨rfl, rfl⟩
+
+/-- Independent induction proof of the arbitrary-iteration invariant target. -/
+theorem iterate_invariant {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, (L.iterate n).post inv ≤ inv := by
+  intro n
+  induction n with
+  | zero => exact le_rfl
+  | succ n ih => exact (L.gc.monotone_l ih).trans h
+
+/-- Independent pullback stability proof for all iteration counts. -/
+theorem iterate_pullback {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, inv ≤ (L.iterate n).pullback inv := by
+  intro n
+  exact ((L.iterate n).gc _ _).mp (iterate_invariant L inv h n)
+
+/-- Establish inv at entry, then preserve it for any finite number of steps. -/
+theorem hoist_invariant {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : IsLoopInvariant L inv) :
+    ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ inv := by
+  intro n
+  exact ((L.iterate n).gc.monotone_l (Round5.entry_invariant E a₀ inv)).trans
+    (iterate_invariant L inv h n)
+
+/-- Independent target-safety proof for all iteration counts. -/
+theorem hoist_target {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    ∀ n : ℕ, (L.iterate n).post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
+  intro n
+  exact (hoist_invariant E L a₀ inv h.1 n).trans h.2
+
+open Round5
+
+/-- A shift with observable behavior at zero, one, two, and three steps. -/
+def shift : CFGTransfer HeaderState HeaderState where
+  post x := (false, x.1, x.2.1)
+  pullback b := (b.2.1, b.2.2, true)
+  gc := by
+    rintro ⟨x₁, x₂, x₃⟩ ⟨b₁, b₂, b₃⟩
+    cases x₁ <;> cases x₂ <;> cases x₃ <;>
+      cases b₁ <;> cases b₂ <;> cases b₃ <;> decide
+
+/-- Select the existing cycle or the new shift, both nonidentity and nonconstant. -/
+def loop (cyclic : Bool) : CFGTransfer HeaderState HeaderState :=
+  if cyclic then Round4.loop true else shift
+
+/-- Six concrete depths; this bounded predicate does not stand for all naturals. -/
+def ThroughFive (P : ℕ → Prop) : Prop := P 0 ∧ P 1 ∧ P 2 ∧ P 3 ∧ P 4 ∧ P 5
+
+/-- Exhaustive forward preservation for both loops, all candidates, and six depths. -/
+theorem finite_iterate (cyclic : Bool) (inv : HeaderState) :
+    IsLoopInvariant (loop cyclic) inv →
+      ThroughFive (fun n => ((loop cyclic).iterate n).post inv ≤ inv) := by
+  unfold IsLoopInvariant ThroughFive
+  rcases inv with ⟨x, y, z⟩
+  cases cyclic <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Exhaustive backward preservation at the same six depths. -/
+theorem finite_pullback (cyclic : Bool) (inv : HeaderState) :
+    IsLoopInvariant (loop cyclic) inv →
+      ThroughFive (fun n => inv ≤ ((loop cyclic).iterate n).pullback inv) := by
+  unfold IsLoopInvariant ThroughFive
+  rcases inv with ⟨x, y, z⟩
+  cases cyclic <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- Exhaustive hoisted preservation, retaining every premise. -/
+theorem finite_hoist_invariant (cyclic : Bool) (a₀ : PreState) (inv : HeaderState) :
+    IsLoopInvariant (loop cyclic) inv →
+      ThroughFive (fun n =>
+        ((loop cyclic).iterate n).post (entry.post (a₀ ⊓ hoistLoopGuard entry a₀ inv)) ≤ inv) := by
+  unfold IsLoopInvariant ThroughFive
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  cases cyclic <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;> cases i₃ <;> decide
+
+/-- Exhaustive hoisted target safety, varying the target independently of inv. -/
+theorem finite_hoist_target (cyclic : Bool) (a₀ : PreState) (inv target : HeaderState) :
+    IsInductiveFor (loop cyclic) inv target →
+      ThroughFive (fun n =>
+        ((loop cyclic).iterate n).post (entry.post (a₀ ⊓ hoistLoopGuard entry a₀ inv)) ≤ target) := by
+  unfold IsInductiveFor IsLoopInvariant ThroughFive
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  rcases target with ⟨t₁, t₂, t₃⟩
+  cases cyclic <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;>
+    cases i₃ <;> cases t₁ <;> cases t₂ <;> cases t₃ <;> decide
+
+/-- All input states exhibit the expected shift and its backward adjoint. -/
+theorem shift_trace (x y z : Bool) :
+    (shift.iterate 0).post (x, y, z) = (x, y, z) ∧
+    (shift.iterate 1).post (x, y, z) = (false, x, y) ∧
+    (shift.iterate 2).post (x, y, z) = (false, false, x) ∧
+    (shift.iterate 3).post (x, y, z) = (false, false, false) ∧
+    (shift.iterate 5).post (x, y, z) = (false, false, false) ∧
+    (shift.iterate 0).pullback (x, y, z) = (x, y, z) ∧
+    (shift.iterate 1).pullback (x, y, z) = (y, z, true) ∧
+    (shift.iterate 2).pullback (x, y, z) = (z, true, true) ∧
+    (shift.iterate 3).pullback (x, y, z) = (true, true, true) ∧
+    (shift.iterate 5).pullback (x, y, z) = (true, true, true) := by
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- The cycle has period three; its post and pullback rotate in opposite directions. -/
+theorem cycle_trace (x y z : Bool) :
+    ((Round4.loop true).iterate 1).post (x, y, z) = (z, x, y) ∧
+    ((Round4.loop true).iterate 2).post (x, y, z) = (y, z, x) ∧
+    ((Round4.loop true).iterate 3).post (x, y, z) = (x, y, z) ∧
+    ((Round4.loop true).iterate 5).post (x, y, z) = (y, z, x) ∧
+    ((Round4.loop true).iterate 1).pullback (x, y, z) = (y, z, x) ∧
+    ((Round4.loop true).iterate 2).pullback (x, y, z) = (z, x, y) ∧
+    ((Round4.loop true).iterate 3).pullback (x, y, z) = (x, y, z) ∧
+    ((Round4.loop true).iterate 5).pullback (x, y, z) = (z, x, y) := by
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- A proper, nonbottom invariant is preserved by strict decrease, not equality. -/
+theorem shift_invariant_witness :
+    IsLoopInvariant shift (false, true, true) ∧
+    (shift.iterate 1).post (false, true, true) = (false, false, true) ∧
+    (shift.iterate 2).post (false, true, true) = (false, false, false) := by
+  unfold IsLoopInvariant
+  decide
+
+/-- Zero iterations still enter the loop; positive depths use the already established inv. -/
+theorem growth_hoisted_trace :
+    let L := Round4.loop false
+    let inv : HeaderState := (true, true, false)
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    (L.iterate 0).post entered = (true, false, false) ∧
+    (L.iterate 1).post entered = inv ∧
+    (L.iterate 2).post entered = inv ∧ (L.iterate 5).post entered = inv := by
+  dsimp only
+  decide
+
+/-- Concrete non-vacuity for the full unbounded claim, with no per-step guard check. -/
+theorem growth_hoist_all_steps :
+    ∀ n : ℕ, ((Round4.loop false).iterate n).post
+      (entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) (true, true, false))) ≤
+        (true, true, false) := by
+  exact hoist_invariant entry (Round4.loop false) (true, true) (true, true, false)
+    (by unfold IsLoopInvariant; decide)
+
+/-- Without invariance, entry and one step can pass, while two steps fail.
+Success at three steps does not repair the failure of the universal claim. -/
+theorem delayed_failure_counterexample :
+    let inv : HeaderState := (true, true, false)
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    ¬ IsLoopInvariant shift inv ∧
+    (shift.iterate 0).post entered ≤ inv ∧ (shift.iterate 1).post entered ≤ inv ∧
+    ¬ ((shift.iterate 2).post entered ≤ inv) ∧ (shift.iterate 3).post entered ≤ inv := by
+  dsimp only
+  unfold IsLoopInvariant
+  decide
+
+end Round6
 
 end CatSem.RedTeam

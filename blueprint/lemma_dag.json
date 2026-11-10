@@ -137,6 +137,41 @@
         "hoistLoopGuard_entry_target"
       ],
       "informal_claim": "If IsInductiveFor L inv target, the hoisted preheader guard guarantees target still holds after executing the preheader followed by the loop body: L.post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= target."
+    },
+    {
+      "id": "isLoopInvariant_iterate",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iff_le_pullback"
+      ],
+      "informal_claim": "If IsLoopInvariant L inv, then inv is preserved across any number of loop iterations: forall n : Nat, (L.iterate n).post inv <= inv."
+    },
+    {
+      "id": "isLoopInvariant_iterate_pullback",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iterate",
+        "isLoopInvariant_iff_le_pullback"
+      ],
+      "informal_claim": "If IsLoopInvariant L inv, then inv is Kripke-Joyal stable under pullback along any n-fold loop path: forall n : Nat, inv <= (L.iterate n).pullback inv."
+    },
+    {
+      "id": "hoistLoopGuard_iterate_invariant",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeEdgeGuard_sound",
+        "isLoopInvariant_iterate"
+      ],
+      "informal_claim": "If IsLoopInvariant L inv, the single preheader guard hoistLoopGuard E a0 inv preserves inv after entering the loop and running n iterations: forall n : Nat, (L.iterate n).post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= inv."
+    },
+    {
+      "id": "hoistLoopGuard_iterate_target",
+      "status": "spec_locked",
+      "depends_on": [
+        "hoistLoopGuard_iterate_invariant",
+        "hoistLoopGuard_entry_target"
+      ],
+      "informal_claim": "If IsInductiveFor L inv target, the hoisted preheader guard guarantees target holds after entering the loop and running n iterations: forall n : Nat, (L.iterate n).post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= target."
     }
   ]
 }
