@@ -80,6 +80,30 @@ example {α : Type*} [HeytingAlgebra α]
       CatSem.IsLoopInvariant L (inv₁ ⊓ inv₂) :=
   CatSem.isLoopInvariant_inf L inv₁ inv₂
 
+example {α : Type*} [HeytingAlgebra α]
+    (L : CatSem.CFGTransfer α α) (inv : α)
+    (h : CatSem.IsLoopInvariant L inv) :
+    (L.comp L).post inv ≤ inv :=
+  CatSem.isLoopInvariant_iterate_two L inv h
+
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CatSem.CFGTransfer α β) (L : CatSem.CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : CatSem.IsInductiveFor L inv target) :
+    E.post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv) ≤ target :=
+  CatSem.hoistLoopGuard_entry_target E L a₀ inv target h
+
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CatSem.CFGTransfer α β) (L : CatSem.CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : CatSem.IsLoopInvariant L inv) :
+    L.post (E.post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) ≤ inv :=
+  CatSem.hoistLoopGuard_step_invariant E L a₀ inv h
+
+example {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CatSem.CFGTransfer α β) (L : CatSem.CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : CatSem.IsInductiveFor L inv target) :
+    L.post (E.post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) ≤ target :=
+  CatSem.hoistLoopGuard_step_target E L a₀ inv target h
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -94,5 +118,9 @@ example {α : Type*} [HeytingAlgebra α]
 #print axioms CatSem.isLoopInvariant_iff_guard_eq_top
 #print axioms CatSem.synthesizeLoopStepGuard_sound
 #print axioms CatSem.isLoopInvariant_inf
+#print axioms CatSem.isLoopInvariant_iterate_two
+#print axioms CatSem.hoistLoopGuard_entry_target
+#print axioms CatSem.hoistLoopGuard_step_invariant
+#print axioms CatSem.hoistLoopGuard_step_target
 
 end CatSem.Verify

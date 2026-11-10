@@ -108,4 +108,35 @@ theorem isLoopInvariant_inf (L : CFGTransfer α α) (inv₁ inv₂ : α) :
   intro h₁ h₂
   exact le_inf ((L.gc.monotone_l inf_le_left).trans h₁) ((L.gc.monotone_l inf_le_right).trans h₂)
 
+/-- Two-Step Loop Invariance: If `IsLoopInvariant L inv`, then `inv` is preserved
+    across two back-to-back iterations `(L.comp L).post inv ≤ inv`. -/
+theorem isLoopInvariant_iterate_two (L : CFGTransfer α α) (inv : α)
+    (h : IsLoopInvariant L inv) :
+    (L.comp L).post inv ≤ inv := by
+  show L.post (L.post inv) ≤ inv
+  exact (L.gc.monotone_l h).trans h
+
+/-- Hoisted Guard Entry Target Soundness: If `IsInductiveFor L inv target`, conjoining
+    preheader state `a₀` with `hoistLoopGuard E a₀ inv` establishes `target` on loop entry. -/
+theorem hoistLoopGuard_entry_target (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    E.post (a₀ ⊓ hoistLoopGuard E a₀ inv) ≤ target := by
+  unfold hoistLoopGuard
+  exact (synthesizeEdgeGuard_sound E a₀ inv).trans h.2
+
+/-- Hoisted Guard One-Step Invariance: If `IsLoopInvariant L inv`, conjoining `a₀` with
+    `hoistLoopGuard E a₀ inv` preserves `inv` after executing the preheader followed by the loop body. -/
+theorem hoistLoopGuard_step_invariant (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : IsLoopInvariant L inv) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ inv := by
+  unfold hoistLoopGuard
+  exact (L.gc.monotone_l (synthesizeEdgeGuard_sound E a₀ inv)).trans h
+
+/-- Hoisted Guard One-Step Target Soundness: If `IsInductiveFor L inv target`, the hoisted
+    preheader guard guarantees `target` still holds after executing the preheader followed by the loop body. -/
+theorem hoistLoopGuard_step_target (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
+  exact (hoistLoopGuard_step_invariant E L a₀ inv h.1).trans h.2
+
 end CatSem

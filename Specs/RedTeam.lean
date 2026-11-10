@@ -4,17 +4,19 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 4 match their blueprint claims after unfolding
+The target statements through Round 5 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All fourteen declarations in `Specs.Target` currently have placeholder proofs. None
+All eighteen declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
-the Prop proofs use conjunction and implication directly. Axiom inspection
-should therefore find no `sorryAx` in these audit declarations.
+the Prop proofs use conjunction and implication directly. The constructive
+Bool instance below avoids the classical Boolean-to-Heyting adapter, and
+the generic proofs avoid choice-dependent library shortcuts. Axiom inspection
+must find neither `sorryAx` nor `Classical.choice` in any audit declaration.
 
 Bool exhausts four state/target pairs and eight state/target/guard triples.
 Prop checks arbitrary propositions, including all True/False combinations.
@@ -24,6 +26,11 @@ premise is meaningful and cannot simply be omitted.
 -/
 
 namespace CatSem.RedTeam
+
+/-- The usual Bool order and implication, with a constructive adjunction proof.
+This keeps all existing truth tables while avoiding the classical adapter. -/
+local instance constructiveBool : HeytingAlgebra Bool :=
+  HeytingAlgebra.ofHImp (fun a b => !a || b) (by decide)
 
 /-- The full blueprint equivalence, proved without the target declarations. -/
 theorem blueprint_adjunction {α : Type*} [HeytingAlgebra α] (a b g : α) :
@@ -328,7 +335,10 @@ theorem composition_assoc {α β γ δ : Type*}
 theorem pullback_meet {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
     (T : CFGTransfer α β) (b₁ b₂ : β) :
     T.pullback (b₁ ⊓ b₂) = T.pullback b₁ ⊓ T.pullback b₂ := by
-  exact T.gc.u_inf
+  apply le_antisymm
+  · exact le_inf (T.gc.monotone_u inf_le_left) (T.gc.monotone_u inf_le_right)
+  · apply (T.gc _ _).mp
+    exact le_inf ((T.gc _ _).mpr inf_le_left) ((T.gc _ _).mpr inf_le_right)
 
 /-- Independent check of the general composition blueprint. -/
 theorem edge_comp {α β γ : Type*}
@@ -343,7 +353,7 @@ theorem edge_meet {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
     synthesizeEdgeGuard T a (b₁ ⊓ b₂) =
       synthesizeEdgeGuard T a b₁ ⊓ synthesizeEdgeGuard T a b₂ := by
   unfold synthesizeEdgeGuard synthesizeGuard
-  rw [T.gc.u_inf, himp_inf_distrib]
+  rw [pullback_meet, himp_inf_distrib]
 
 /-- Independent check of the general diamond blueprint, without path equality. -/
 theorem diamond_adjunction {α γ : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
@@ -654,5 +664,194 @@ theorem invariance_need_not_be_fixedpoint :
   decide
 
 end Round4
+
+/-!
+## Round 5: inductive witnesses and preheader hoisting
+
+Both definitions and all four new statements match the blueprint exactly.
+`IsInductiveFor L inv target` contains preservation and `inv ≤ target`.
+`hoistLoopGuard E a₀ inv` establishes the chosen invariant on loop entry;
+it does not synthesize that invariant or minimize the guard over all possible
+invariants. Entry-target soundness needs only the entailment conjunct, while
+the one-step target theorem needs both. Two-step preservation follows from
+monotonicity and invariance. No termination or unrestricted iteration theorem
+is part of these four statements.
+
+The preheader has two Boolean coordinates, and the loop header has three:
+`E.post (x,y) = (y,false,x)` and `E.pullback (u,v,w) = (w,u)`.
+Both maps are nonconstant. With the growth loop from Round 4, preheader 11
+and invariant/target 110 produce guard 01, entry 100, and loop state 110.
+Thus the guard is restrictive, execution remains nonempty, and the loop
+actually changes the entered state. Tests also reject missing preservation,
+missing target entailment, and omitting the entry guard.
+
+Exhaustive checks cover 16 loop/candidate cases for two-step preservation,
+512 loop/preheader/invariant/target cases for each target theorem, and 64
+loop/preheader/invariant cases for step-invariance: 1104 cases in total.
+All audit declarations, including previous rounds, are checked without
+`sorryAx` or `Classical.choice`; only `propext` and `Quot.sound` may remain.
+-/
+
+namespace Round5
+
+/-- Independent proof of preservation across two composed loop iterations. -/
+theorem iterate_two {α : Type*} [HeytingAlgebra α]
+    (L : CFGTransfer α α) (inv : α) (h : IsLoopInvariant L inv) :
+    (L.comp L).post inv ≤ inv := by
+  exact (L.gc.monotone_l h).trans h
+
+/-- Hoisting establishes the selected invariant without assuming preservation. -/
+theorem entry_invariant {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (a₀ : α) (inv : β) :
+    E.post (a₀ ⊓ hoistLoopGuard E a₀ inv) ≤ inv := by
+  exact (E.gc _ _).mpr (le_himp_iff'.mp le_rfl)
+
+/-- Independent proof of the entry-target blueprint. -/
+theorem entry_target {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    E.post (a₀ ⊓ hoistLoopGuard E a₀ inv) ≤ target := by
+  exact (entry_invariant E a₀ inv).trans h.2
+
+/-- Independent proof of the preheader-plus-loop preservation blueprint. -/
+theorem step_invariant {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : IsLoopInvariant L inv) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ inv := by
+  exact (L.gc.monotone_l (entry_invariant E a₀ inv)).trans h
+
+/-- Independent proof of the preheader-plus-loop target blueprint. -/
+theorem step_target {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
+  exact (step_invariant E L a₀ inv h.1).trans h.2
+
+/-- Check the definition's weakest-guard claim for the selected invariant. -/
+theorem hoist_adjunction {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (a₀ g : α) (inv : β) :
+    E.post (a₀ ⊓ g) ≤ inv ↔ g ≤ hoistLoopGuard E a₀ inv := by
+  exact Round2.edge_adjunction E a₀ inv g
+
+abbrev PreState := Round2.State
+abbrev HeaderState := Round4.State
+
+/-- A nonconstant entry edge between different finite state domains. -/
+def entry : CFGTransfer PreState HeaderState where
+  post x := (x.2, false, x.1)
+  pullback b := (b.2.2, b.1)
+  gc := by
+    rintro ⟨x₁, x₂⟩ ⟨b₁, b₂, b₃⟩
+    cases x₁ <;> cases x₂ <;> cases b₁ <;> cases b₂ <;> cases b₃ <;> decide
+
+/-- Neither direction of the entry edge is constant. -/
+theorem entry_nonconstant :
+    entry.post (false, false) ≠ entry.post (true, true) ∧
+    entry.pullback (false, false, false) ≠ entry.pullback (true, true, true) := by
+  decide
+
+/-- All 32 preheader/invariant combinations have this Boolean guard formula. -/
+theorem hoist_truth_table (a b x y z : Bool) :
+    hoistLoopGuard entry (a, b) (x, y, z) = (!a || z, !b || x) := by
+  cases a <;> cases b <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- All 16 loop/candidate cases, preserving the invariance premise. -/
+theorem finite_iterate_two (cycle : Bool) (inv : HeaderState) :
+    IsLoopInvariant (Round4.loop cycle) inv →
+      ((Round4.loop cycle).comp (Round4.loop cycle)).post inv ≤ inv := by
+  unfold IsLoopInvariant
+  rcases inv with ⟨x, y, z⟩
+  cases cycle <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- All 512 loop/preheader/invariant/target cases for entry target soundness. -/
+theorem finite_entry_target (cycle : Bool) (a₀ : PreState) (inv target : HeaderState) :
+    IsInductiveFor (Round4.loop cycle) inv target →
+      entry.post (a₀ ⊓ hoistLoopGuard entry a₀ inv) ≤ target := by
+  unfold IsInductiveFor IsLoopInvariant
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  rcases target with ⟨t₁, t₂, t₃⟩
+  cases cycle <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;>
+    cases i₃ <;> cases t₁ <;> cases t₂ <;> cases t₃ <;> decide
+
+/-- All 64 loop/preheader/invariant cases for preservation after entry and a step. -/
+theorem finite_step_invariant (cycle : Bool) (a₀ : PreState) (inv : HeaderState) :
+    IsLoopInvariant (Round4.loop cycle) inv →
+      (Round4.loop cycle).post (entry.post (a₀ ⊓ hoistLoopGuard entry a₀ inv)) ≤ inv := by
+  unfold IsLoopInvariant
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  cases cycle <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;> cases i₃ <;> decide
+
+/-- All 512 loop/preheader/invariant/target cases for target soundness after a step. -/
+theorem finite_step_target (cycle : Bool) (a₀ : PreState) (inv target : HeaderState) :
+    IsInductiveFor (Round4.loop cycle) inv target →
+      (Round4.loop cycle).post (entry.post (a₀ ⊓ hoistLoopGuard entry a₀ inv)) ≤ target := by
+  unfold IsInductiveFor IsLoopInvariant
+  rcases a₀ with ⟨a₁, a₂⟩
+  rcases inv with ⟨i₁, i₂, i₃⟩
+  rcases target with ⟨t₁, t₂, t₃⟩
+  cases cycle <;> cases a₁ <;> cases a₂ <;> cases i₁ <;> cases i₂ <;>
+    cases i₃ <;> cases t₁ <;> cases t₂ <;> cases t₃ <;> decide
+
+/-- A proper inductive invariant, restrictive nonbottom guard, and changing loop state. -/
+theorem active_hoist_witness :
+    let L := Round4.loop false
+    let a₀ : PreState := (true, true)
+    let inv : HeaderState := (true, true, false)
+    let guard := hoistLoopGuard entry a₀ inv
+    let entered := entry.post (a₀ ⊓ guard)
+    IsInductiveFor L inv inv ∧ guard = (false, true) ∧
+      a₀ ⊓ guard = (false, true) ∧ entered = (true, false, false) ∧
+      L.post entered = inv ∧ (L.comp L).post entered ≤ inv := by
+  dsimp only
+  unfold IsInductiveFor IsLoopInvariant
+  decide
+
+/-- Entry can establish inv while a subsequent loop step violates it:
+preservation is necessary for both loop-step claims and the two-step claim. -/
+theorem missing_invariance_counterexample :
+    let L := Round4.loop false
+    let inv : HeaderState := (true, false, false)
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    ¬ IsLoopInvariant L inv ∧ entered = inv ∧
+      ¬ ((L.comp L).post inv ≤ inv) ∧ ¬ (L.post entered ≤ inv) := by
+  dsimp only
+  unfold IsLoopInvariant
+  decide
+
+/-- Preservation alone cannot guarantee a target not implied by the invariant. -/
+theorem missing_entailment_counterexample :
+    let L := Round4.loop false
+    let inv : HeaderState := (true, true, false)
+    let target : HeaderState := (false, true, false)
+    let entered := entry.post ((true, true) ⊓ hoistLoopGuard entry (true, true) inv)
+    IsLoopInvariant L inv ∧ ¬ (inv ≤ target) ∧
+      ¬ (entered ≤ target) ∧ ¬ (L.post entered ≤ target) := by
+  dsimp only
+  unfold IsLoopInvariant
+  decide
+
+/-- Omitting the restrictive guard breaks both entry and post-step target safety. -/
+theorem missing_guard_counterexample :
+    ¬ (entry.post (true, true) ≤ (true, true, false)) ∧
+    ¬ ((Round4.loop false).post (entry.post (true, true)) ≤ (true, true, false)) := by
+  decide
+
+/-- Hoisting is weakest for the chosen inv, not necessarily for the target:
+a larger guard can still establish a larger proper target. -/
+theorem target_guard_can_be_weaker :
+    let L := Round4.loop false
+    let inv : HeaderState := (false, true, false)
+    let target : HeaderState := (true, true, false)
+    let g : PreState := (false, true)
+    IsInductiveFor L inv target ∧ entry.post g ≤ target ∧
+      L.post (entry.post g) ≤ target ∧
+      ¬ (g ≤ hoistLoopGuard entry (true, true) inv) := by
+  dsimp only
+  unfold IsInductiveFor IsLoopInvariant
+  decide
+
+end Round5
 
 end CatSem.RedTeam

@@ -103,6 +103,40 @@
         "pullback_map_inf"
       ],
       "informal_claim": "If inv1 and inv2 are both loop invariants for L, their conjunction inv1 meet inv2 is also a loop invariant."
+    },
+    {
+      "id": "isLoopInvariant_iterate_two",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iff_le_pullback"
+      ],
+      "informal_claim": "If IsLoopInvariant L inv, then inv is preserved across two back-to-back iterations: (L.comp L).post inv <= inv."
+    },
+    {
+      "id": "hoistLoopGuard_entry_target",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeEdgeGuard_sound"
+      ],
+      "informal_claim": "If IsInductiveFor L inv target, conjoining preheader state a0 with hoistLoopGuard E a0 inv establishes target on loop entry: E.post (a0 meet hoistLoopGuard E a0 inv) <= target."
+    },
+    {
+      "id": "hoistLoopGuard_step_invariant",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeEdgeGuard_sound",
+        "isLoopInvariant_iff_le_pullback"
+      ],
+      "informal_claim": "If IsLoopInvariant L inv, conjoining a0 with hoistLoopGuard E a0 inv preserves inv after executing the preheader followed by the loop body: L.post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= inv."
+    },
+    {
+      "id": "hoistLoopGuard_step_target",
+      "status": "spec_locked",
+      "depends_on": [
+        "hoistLoopGuard_step_invariant",
+        "hoistLoopGuard_entry_target"
+      ],
+      "informal_claim": "If IsInductiveFor L inv target, the hoisted preheader guard guarantees target still holds after executing the preheader followed by the loop body: L.post (E.post (a0 meet hoistLoopGuard E a0 inv)) <= target."
     }
   ]
 }

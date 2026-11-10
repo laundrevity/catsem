@@ -68,4 +68,23 @@ example : IsLoopInvariant (CFGTransfer.id Prop) True := by
 example : synthesizeLoopStepGuard (CFGTransfer.id Prop) True := by
   simp [synthesizeLoopStepGuard, synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
 
+/-- An invariant `inv` is an inductive witness for a target property `target` under loop `L`
+    if `inv` is a loop invariant for `L` and implies `target`. -/
+def IsInductiveFor {α : Type*} [HeytingAlgebra α] (L : CFGTransfer α α) (inv target : α) : Prop :=
+  IsLoopInvariant L inv ∧ inv ≤ target
+
+/-- Hoisted preheader guard synthesis across loop entry edge `E : CFGTransfer α β`:
+    synthesizes the weakest guard at the preheader `a₀` that establishes loop invariant `inv`
+    upon entering the loop header. -/
+def hoistLoopGuard {α β : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (E : CFGTransfer α β) (a₀ : α) (inv : β) : α :=
+  synthesizeEdgeGuard E a₀ inv
+
+-- Sanity checks on inductive witnesses and hoisted preheader guards over Prop
+example : IsInductiveFor (CFGTransfer.id Prop) False True := by
+  simp [IsInductiveFor, IsLoopInvariant, CFGTransfer.id]
+
+example : ¬ hoistLoopGuard (CFGTransfer.id Prop) True False := by
+  simp [hoistLoopGuard, synthesizeEdgeGuard, CFGTransfer.id, synthesizeGuard]
+
 end CatSem

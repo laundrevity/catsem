@@ -92,4 +92,32 @@ theorem isLoopInvariant_inf (L : CFGTransfer α α) (inv₁ inv₂ : α) :
     IsLoopInvariant L inv₁ → IsLoopInvariant L inv₂ → IsLoopInvariant L (inv₁ ⊓ inv₂) := by
   sorry
 
+/-- Two-Step Loop Invariance: If `IsLoopInvariant L inv`, then `inv` is preserved
+    across two back-to-back iterations `(L.comp L).post inv ≤ inv`. -/
+theorem isLoopInvariant_iterate_two (L : CFGTransfer α α) (inv : α)
+    (h : IsLoopInvariant L inv) :
+    (L.comp L).post inv ≤ inv := by
+  sorry
+
+/-- Hoisted Guard Entry Target Soundness: If `IsInductiveFor L inv target`, conjoining
+    preheader state `a₀` with `hoistLoopGuard E a₀ inv` establishes `target` on loop entry. -/
+theorem hoistLoopGuard_entry_target (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    E.post (a₀ ⊓ hoistLoopGuard E a₀ inv) ≤ target := by
+  sorry
+
+/-- Hoisted Guard One-Step Invariance: If `IsLoopInvariant L inv`, conjoining `a₀` with
+    `hoistLoopGuard E a₀ inv` preserves `inv` after executing the preheader followed by the loop body. -/
+theorem hoistLoopGuard_step_invariant (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv : β) (h : IsLoopInvariant L inv) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ inv := by
+  sorry
+
+/-- Hoisted Guard One-Step Target Soundness: If `IsInductiveFor L inv target`, the hoisted
+    preheader guard guarantees `target` still holds after executing the preheader followed by the loop body. -/
+theorem hoistLoopGuard_step_target (E : CFGTransfer α β) (L : CFGTransfer β β)
+    (a₀ : α) (inv target : β) (h : IsInductiveFor L inv target) :
+    L.post (E.post (a₀ ⊓ hoistLoopGuard E a₀ inv)) ≤ target := by
+  sorry
+
 end CatSem
