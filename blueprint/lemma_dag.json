@@ -9,7 +9,42 @@
     {
       "id": "synthesizeGuard_weakest",
       "status": "spec_locked",
+      "informal_claim": "In any Heyting algebra, if a meet g <= b then g <= (a => b)."
+    },
+    {
+      "id": "synthesizeGuard_adjunction",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuard_sound",
+        "synthesizeGuard_weakest"
+      ],
       "informal_claim": "By the Heyting adjunction, a meet g <= b iff g <= (a => b)."
+    },
+    {
+      "id": "synthesizeEdgeGuard_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuard_sound"
+      ],
+      "informal_claim": "For any Kripke-Joyal CFG transfer T with GaloisConnection post pullback, T.post (a meet synthesizeEdgeGuard T a b) <= b."
+    },
+    {
+      "id": "synthesizeEdgeGuard_weakest",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuard_weakest"
+      ],
+      "informal_claim": "For any Kripke-Joyal CFG transfer T with GaloisConnection post pullback, if T.post (a meet g) <= b then g <= synthesizeEdgeGuard T a b."
+    },
+    {
+      "id": "synthesizeBranchGuard_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeEdgeGuard_sound",
+        "synthesizeEdgeGuard_weakest",
+        "synthesizeGuard_adjunction"
+      ],
+      "informal_claim": "Across two CFG branch transitions T1 and T2, T1.post (a meet g) <= b1 and T2.post (a meet g) <= b2 iff g <= synthesizeEdgeGuard T1 a b1 meet synthesizeEdgeGuard T2 a b2."
     }
   ]
 }
