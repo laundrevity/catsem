@@ -157,4 +157,18 @@ example : CompatibleOp2 (fun (_ : Prop) (n : ℕ) => n) (· + ·) (fun _ x y => 
   intro _ _ _
   rfl
 
+/-- Concrete instantiation of `CFGTransfer` for a state transition `step : S₁ → S₂`
+    over Heyting state-predicate fibers `S → Prop`, with constructive Galois connection
+    between existential image (`post`) and weakest-precondition substitution (`pullback`). -/
+def stateTransfer {S₁ S₂ : Type*} (step : S₁ → S₂) : CFGTransfer (S₁ → Prop) (S₂ → Prop) where
+  pullback := fun Q s₁ => Q (step s₁)
+  post := fun P s₂ => ∃ s₁, step s₁ = s₂ ∧ P s₁
+  gc := fun _ _ =>
+    ⟨fun h s₁ hp => h (step s₁) ⟨s₁, rfl, hp⟩,
+     fun h _ ⟨s₁, hstep, hp⟩ => hstep ▸ h s₁ hp⟩
+
+-- Sanity checks on concrete state-predicate CFG transfer
+example : (stateTransfer (fun n : ℕ => n + 1)).pullback (fun n => n > 0) 0 := by
+  simp [stateTransfer]
+
 end CatSem

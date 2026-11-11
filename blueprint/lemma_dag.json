@@ -285,6 +285,36 @@
         "synthesizeDiamondGuard_iff"
       ],
       "informal_claim": "Given two converging CFG paths P1, P2 : CFGTransfer alpha gamma and GuardedEquiv eval_gamma c t1 t2, defining g := synthesizeEdgeGuard P1 a c meet synthesizeEdgeGuard P2 a c guarantees both eval_gamma (P1.post (a meet g)) t1 = eval_gamma (P1.post (a meet g)) t2 and eval_gamma (P2.post (a meet g)) t1 = eval_gamma (P2.post (a meet g)) t2."
+    },
+    {
+      "id": "stateTransfer_pullback_apply",
+      "status": "spec_locked",
+      "informal_claim": "For any concrete state transition step : S1 -> S2, (stateTransfer step).pullback Q s1 iff Q (step s1)."
+    },
+    {
+      "id": "stateTransfer_synthesizeEdgeGuard_apply",
+      "status": "spec_locked",
+      "depends_on": [
+        "stateTransfer_pullback_apply"
+      ],
+      "informal_claim": "For any concrete state transition step : S1 -> S2, synthesizeEdgeGuard (stateTransfer step) P Q s1 iff (P s1 -> Q (step s1))."
+    },
+    {
+      "id": "stateTransfer_isLoopInvariant_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "isLoopInvariant_iff_le_pullback",
+        "stateTransfer_pullback_apply"
+      ],
+      "informal_claim": "For any concrete loop step : S -> S and inv : S -> Prop, IsLoopInvariant (stateTransfer step) inv iff forall s, inv s -> inv (step s)."
+    },
+    {
+      "id": "stateTransfer_hoistLoopGuard_iterate_equiv",
+      "status": "spec_locked",
+      "depends_on": [
+        "guardedEquiv_hoistLoopGuard_iterate"
+      ],
+      "informal_claim": "For concrete transitions init : S0 -> S and step : S -> S, if IsInductiveFor (stateTransfer step) inv q and GuardedEquiv eval q t1 t2, then the hoisted preheader guard guarantees eval equality across all n iterations."
     }
   ]
 }

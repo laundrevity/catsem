@@ -2,7 +2,7 @@ import Specs.Defs
 
 namespace CatSem
 
-variable {α β β₁ β₂ γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂] [HeytingAlgebra γ]
+variable {α β β₁ β₂ γ Term Val S S₀ S₁ S₂ : Type*} [HeytingAlgebra α] [HeytingAlgebra β] [HeytingAlgebra β₁] [HeytingAlgebra β₂] [HeytingAlgebra γ]
 
 /-- Soundness: Conjoining state `a` with `synthesizeGuard a b` establishes `b`. -/
 theorem synthesizeGuard_sound (a b : α) :
@@ -278,6 +278,40 @@ theorem guardedEquiv_diamond (P₁ P₂ : CFGTransfer α γ) (evalγ : γ → Te
     let g := synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c
     evalγ (P₁.post (a ⊓ g)) t₁ = evalγ (P₁.post (a ⊓ g)) t₂ ∧
       evalγ (P₂.post (a ⊓ g)) t₁ = evalγ (P₂.post (a ⊓ g)) t₂ := by
+  sorry
+
+/-- Concrete Pullback Application: Applying `(stateTransfer step).pullback Q` at `s₁`
+    computes the weakest precondition `Q (step s₁)`. -/
+theorem stateTransfer_pullback_apply (step : S₁ → S₂) (Q : S₂ → Prop) (s₁ : S₁) :
+    (stateTransfer step).pullback Q s₁ ↔ Q (step s₁) := by
+  sorry
+
+/-- Concrete Edge Guard Synthesis: Pointwise evaluation of `synthesizeEdgeGuard (stateTransfer step) P Q`
+    at state `s₁` is the logical implication `P s₁ → Q (step s₁)`. -/
+theorem stateTransfer_synthesizeEdgeGuard_apply (step : S₁ → S₂)
+    (P : S₁ → Prop) (Q : S₂ → Prop) (s₁ : S₁) :
+    synthesizeEdgeGuard (stateTransfer step) P Q s₁ ↔ (P s₁ → Q (step s₁)) := by
+  sorry
+
+/-- Concrete Hoare Loop Invariance: `IsLoopInvariant (stateTransfer step) inv` holds if and only if
+    `inv` is preserved pointwise by `step` (`∀ s, inv s → inv (step s)`). -/
+theorem stateTransfer_isLoopInvariant_iff (step : S → S) (inv : S → Prop) :
+    IsLoopInvariant (stateTransfer step) inv ↔ ∀ s, inv s → inv (step s) := by
+  sorry
+
+/-- Concrete Loop-Hoisted Guarded Rewrite Soundness: Given an entry transition `init : S₀ → S`,
+    a loop step `step : S → S`, predicates `a₀ : S₀ → Prop` and `inv q : S → Prop`, and a
+    conditional IR rewrite `GuardedEquiv eval q t₁ t₂`, if `IsInductiveFor (stateTransfer step) inv q`,
+    then for every `n : ℕ`, `t₁` and `t₂` evaluate identically after entering the loop under the
+    hoisted guard and executing `n` iterations. -/
+theorem stateTransfer_hoistLoopGuard_iterate_equiv (init : S₀ → S) (step : S → S)
+    (eval : (S → Prop) → Term → Val) (a₀ : S₀ → Prop) (inv q : S → Prop) (t₁ t₂ : Term)
+    (hind : IsInductiveFor (stateTransfer step) inv q) (heq : GuardedEquiv eval q t₁ t₂) :
+    ∀ n : ℕ,
+      eval (((stateTransfer init).comp ((stateTransfer step).iterate n)).post
+        (a₀ ⊓ hoistLoopGuard (stateTransfer init) a₀ inv)) t₁ =
+      eval (((stateTransfer init).comp ((stateTransfer step).iterate n)).post
+        (a₀ ⊓ hoistLoopGuard (stateTransfer init) a₀ inv)) t₂ := by
   sorry
 
 end CatSem

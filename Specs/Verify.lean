@@ -231,6 +231,30 @@ example {α γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
       evalγ (P₂.post (a ⊓ g)) t₁ = evalγ (P₂.post (a ⊓ g)) t₂ :=
   CatSem.guardedEquiv_diamond P₁ P₂ evalγ a c t₁ t₂ h
 
+example {S₁ S₂ : Type*} (step : S₁ → S₂) (Q : S₂ → Prop) (s₁ : S₁) :
+    (CatSem.stateTransfer step).pullback Q s₁ ↔ Q (step s₁) :=
+  CatSem.stateTransfer_pullback_apply step Q s₁
+
+example {S₁ S₂ : Type*} (step : S₁ → S₂) (P : S₁ → Prop) (Q : S₂ → Prop) (s₁ : S₁) :
+    CatSem.synthesizeEdgeGuard (CatSem.stateTransfer step) P Q s₁ ↔ (P s₁ → Q (step s₁)) :=
+  CatSem.stateTransfer_synthesizeEdgeGuard_apply step P Q s₁
+
+example {S : Type*} (step : S → S) (inv : S → Prop) :
+    CatSem.IsLoopInvariant (CatSem.stateTransfer step) inv ↔ ∀ s, inv s → inv (step s) :=
+  CatSem.stateTransfer_isLoopInvariant_iff step inv
+
+example {S₀ S Term Val : Type*} (init : S₀ → S) (step : S → S)
+    (eval : (S → Prop) → Term → Val) (a₀ : S₀ → Prop) (inv q : S → Prop) (t₁ t₂ : Term)
+    (hind : CatSem.IsInductiveFor (CatSem.stateTransfer step) inv q)
+    (heq : CatSem.GuardedEquiv eval q t₁ t₂) :
+    ∀ n : ℕ,
+      eval (((CatSem.stateTransfer init).comp ((CatSem.stateTransfer step).iterate n)).post
+        (a₀ ⊓ CatSem.hoistLoopGuard (CatSem.stateTransfer init) a₀ inv)) t₁ =
+      eval (((CatSem.stateTransfer init).comp ((CatSem.stateTransfer step).iterate n)).post
+        (a₀ ⊓ CatSem.hoistLoopGuard (CatSem.stateTransfer init) a₀ inv)) t₂ :=
+  CatSem.stateTransfer_hoistLoopGuard_iterate_equiv init step eval a₀ inv q t₁ t₂ hind heq
+
+#print axioms CatSem.stateTransfer
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -269,5 +293,9 @@ example {α γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
 #print axioms CatSem.guardedEquiv_congr2_synthesize
 #print axioms CatSem.guardedEquiv_pullback_inf_commute
 #print axioms CatSem.guardedEquiv_diamond
+#print axioms CatSem.stateTransfer_pullback_apply
+#print axioms CatSem.stateTransfer_synthesizeEdgeGuard_apply
+#print axioms CatSem.stateTransfer_isLoopInvariant_iff
+#print axioms CatSem.stateTransfer_hoistLoopGuard_iterate_equiv
 
 end CatSem.Verify

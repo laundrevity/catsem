@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 10 match their blueprint claims after unfolding
+The target statements through Round 11 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All thirty-eight declarations in `Specs.Target` currently have placeholder proofs. None
+All forty-two declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -2045,5 +2045,258 @@ theorem each_path_guard_required :
   decide
 
 end Round10
+
+/-!
+## Round 11: concrete imperative state transitions
+
+The definition and all four statements match the blueprint. `stateTransfer`
+uses existential image for postconditions and substitution for pullbacks.
+The adjunction is constructive and requires neither an inverse transition
+nor a chosen preimage. The pointwise invariant condition is ordinary Hoare
+preservation for a total transition function. The final target still uses
+a predicate-indexed evaluator, rather than evaluating one arbitrarily
+selected state; total transitions and finite-iteration safety do not assert
+termination.
+
+The concrete state is (counter, divisor) : Nat × Nat. Entry initializes the
+counter to zero, and the loop increments it while retaining the divisor.
+The proper invariant is divisor > 0. From an unrestricted preheader, the
+hoisted guard accepts precisely positive divisors and rejects zero. Exact
+reachability is proved for every n: reached n (c,d) iff c=n and d>0.
+In particular (n,1) is reachable for every n, so the safety evidence is never
+based only on an empty set of reachable states.
+
+The conditional rewrite is c + d/d -> c + 1. A collecting evaluator maps a
+state predicate to the predicate of possible numeric results, using only
+existential witnesses. It makes no representative-state selection. Both
+terms have exactly the possible result n+1 after n iterations. Natural
+division is total, and d=0 makes the two terms differ; a loop that decrements
+the divisor demonstrates why preservation is necessary. All results and
+the stateTransfer definition are checked without sorryAx or Classical.choice.
+-/
+
+namespace Round11
+
+/-- Independent verification of weakest-precondition substitution. -/
+theorem pullback_apply {S₁ S₂ : Type*} (step : S₁ → S₂) (Q : S₂ → Prop) (s₁ : S₁) :
+    (stateTransfer step).pullback Q s₁ ↔ Q (step s₁) := by
+  rfl
+
+/-- Independent verification of pointwise residual-guard implication. -/
+theorem edge_guard_apply {S₁ S₂ : Type*} (step : S₁ → S₂)
+    (P : S₁ → Prop) (Q : S₂ → Prop) (s₁ : S₁) :
+    synthesizeEdgeGuard (stateTransfer step) P Q s₁ ↔ (P s₁ → Q (step s₁)) := by
+  rfl
+
+/-- The image-based invariant condition is exactly pointwise preservation. -/
+theorem invariant_iff {S : Type*} (step : S → S) (inv : S → Prop) :
+    IsLoopInvariant (stateTransfer step) inv ↔ ∀ s, inv s → inv (step s) := by
+  exact (stateTransfer step).gc inv inv
+
+/-- Independent specialization of the audited loop-hoisted rewrite theorem. -/
+theorem hoisted_equiv {S₀ S Term Val : Type*} (init : S₀ → S) (step : S → S)
+    (eval : (S → Prop) → Term → Val) (a₀ : S₀ → Prop) (inv q : S → Prop) (t₁ t₂ : Term)
+    (hind : IsInductiveFor (stateTransfer step) inv q) (heq : GuardedEquiv eval q t₁ t₂) :
+    ∀ n : ℕ,
+      eval (((stateTransfer init).comp ((stateTransfer step).iterate n)).post
+        (a₀ ⊓ hoistLoopGuard (stateTransfer init) a₀ inv)) t₁ =
+      eval (((stateTransfer init).comp ((stateTransfer step).iterate n)).post
+        (a₀ ⊓ hoistLoopGuard (stateTransfer init) a₀ inv)) t₂ := by
+  exact Round9.hoisted_rewrite (stateTransfer init) (stateTransfer step) eval a₀ inv q t₁ t₂ hind heq
+
+/-- A many-to-one reset confirms existential, rather than universal, image semantics. -/
+theorem reset_image (P : ℕ → Prop) (m : ℕ) :
+    (stateTransfer (fun _ : ℕ => 0)).post P m ↔ m = 0 ∧ ∃ n, P n := by
+  constructor
+  · rintro ⟨n, hm, hp⟩
+    exact ⟨hm.symm, n, hp⟩
+  · rintro ⟨rfl, n, hp⟩
+    exact ⟨n, rfl, hp⟩
+
+abbrev State := ℕ × ℕ
+
+def init (d : ℕ) : State := (0, d)
+def step (s : State) : State := (s.1 + 1, s.2)
+def initial (_ : ℕ) : Prop := True
+def positive (s : State) : Prop := 0 < s.2
+
+/-- The actual predicate reached after guarded entry and n loop iterations. -/
+def reached (n : ℕ) : State → Prop :=
+  ((stateTransfer init).comp ((stateTransfer step).iterate n)).post
+    (initial ⊓ hoistLoopGuard (stateTransfer init) initial positive)
+
+/-- The divisor is unchanged by the loop, so positivity is inductive. -/
+theorem positive_invariant : IsLoopInvariant (stateTransfer step) positive := by
+  exact (invariant_iff step positive).mpr (fun _ h => h)
+
+theorem positive_inductive : IsInductiveFor (stateTransfer step) positive positive := by
+  exact ⟨positive_invariant, fun _ h => h⟩
+
+/-- The preheader guard is precisely the nonzero-divisor test. -/
+theorem entry_guard (d : ℕ) :
+    hoistLoopGuard (stateTransfer init) initial positive d ↔ 0 < d := by
+  change (True → 0 < d) ↔ 0 < d
+  exact ⟨fun h => h True.intro, fun hd _ => hd⟩
+
+/-- The guard is satisfiable and restrictive. -/
+theorem entry_guard_examples :
+    hoistLoopGuard (stateTransfer init) initial positive 1 ∧
+    hoistLoopGuard (stateTransfer init) initial positive 2 ∧
+    ¬ hoistLoopGuard (stateTransfer init) initial positive 0 := by
+  simp only [entry_guard]
+  decide
+
+/-- Counter-dependent postconditions detect the increment in the pullback. -/
+theorem counter_pullback_examples :
+    (stateTransfer step).pullback (fun s => s.1 = 2) (1, 3) ∧
+    ¬ (stateTransfer step).pullback (fun s => s.1 = 2) (2, 3) := by
+  change (1 + 1 = 2) ∧ ¬ (2 + 1 = 2)
+  decide
+
+/-- The edge guard is conditional on its source predicate, including false antecedents. -/
+theorem edge_guard_examples :
+    let P : State → Prop := fun s => s.1 = 0
+    let Q : State → Prop := fun s => s.1 = 1 ∧ 0 < s.2
+    ¬ synthesizeEdgeGuard (stateTransfer step) P Q (0, 0) ∧
+    synthesizeEdgeGuard (stateTransfer step) P Q (0, 2) ∧
+    synthesizeEdgeGuard (stateTransfer step) P Q (1, 0) := by
+  change ¬ (0 = 0 → 1 = 1 ∧ 0 < 0) ∧
+    (0 = 0 → 1 = 1 ∧ 0 < 2) ∧ (1 = 0 → 2 = 1 ∧ 0 < 0)
+  decide
+
+/-- Exact reachability, including zero iterations and all positive input divisors. -/
+theorem reached_iff (n c d : ℕ) : reached n (c, d) ↔ c = n ∧ 0 < d := by
+  induction n generalizing c d with
+  | zero =>
+    constructor
+    · rintro ⟨e, hstate, hguard⟩
+      have he : 0 < e := hguard.2 True.intro
+      cases hstate
+      exact ⟨rfl, he⟩
+    · rintro ⟨rfl, hd⟩
+      exact ⟨d, rfl, True.intro, fun _ => hd⟩
+  | succ n ih =>
+    change (∃ s, step s = (c, d) ∧ reached n s) ↔ c = n + 1 ∧ 0 < d
+    constructor
+    · rintro ⟨⟨p, e⟩, hs, hp⟩
+      rcases (ih p e).mp hp with ⟨rfl, he⟩
+      cases hs
+      exact ⟨rfl, he⟩
+    · rintro ⟨rfl, hd⟩
+      exact ⟨(n, d), rfl, (ih n d).mpr ⟨rfl, hd⟩⟩
+
+/-- A concrete state exists at every iteration count; the invariant is not vacuous. -/
+theorem reached_nonempty (n : ℕ) : ∃ s, reached n s := by
+  exact ⟨(n, 1), (reached_iff n n 1).mpr ⟨rfl, by decide⟩⟩
+
+/-- Exact traces include both valid states and rejected counter/divisor combinations. -/
+theorem reachability_examples :
+    reached 0 (0, 2) ∧ reached 1 (1, 2) ∧ reached 4 (4, 2) ∧
+    ¬ reached 2 (1, 2) ∧ ¬ reached 3 (3, 0) := by
+  simp only [reached_iff]
+  decide
+
+/-- Two arithmetic IR expressions differing only by the guarded division simplification. -/
+inductive CounterExpr where
+  | withDivision
+  | increment
+
+def scalarEval (s : State) : CounterExpr → ℕ
+  | .withDivision => s.1 + s.2 / s.2
+  | .increment => s.1 + 1
+
+/-- Collect possible values constructively, without choosing any representative state. -/
+def collectEval (P : State → Prop) (t : CounterExpr) : ℕ → Prop :=
+  fun v => ∃ s, P s ∧ scalarEval s t = v
+
+/-- The ordinary state-level arithmetic rewrite is valid on positive divisors. -/
+theorem scalar_rewrite (s : State) (h : positive s) :
+    scalarEval s .withDivision = scalarEval s .increment := by
+  change s.1 + s.2 / s.2 = s.1 + 1
+  rw [Nat.div_self h]
+
+/-- Statewise equality lifts to equality of collected results at every forcing predicate. -/
+theorem guarded_division : GuardedEquiv collectEval positive .withDivision .increment := by
+  intro P hP
+  funext v
+  apply propext
+  constructor
+  · rintro ⟨s, hs, hv⟩
+    exact ⟨s, hs, (scalar_rewrite s (hP s hs)).symm.trans hv⟩
+  · rintro ⟨s, hs, hv⟩
+    exact ⟨s, hs, (scalar_rewrite s (hP s hs)).trans hv⟩
+
+/-- Concrete non-vacuous instantiation of the full all-iteration rewrite target. -/
+theorem hoisted_rewrite_all :
+    ∀ n : ℕ, collectEval (reached n) .withDivision = collectEval (reached n) .increment := by
+  exact hoisted_equiv init step collectEval initial positive positive
+    .withDivision .increment positive_inductive guarded_division
+
+/-- The original expression has exactly the result n+1 after n iterations. -/
+theorem collected_result (n v : ℕ) :
+    collectEval (reached n) .withDivision v ↔ v = n + 1 := by
+  constructor
+  · rintro ⟨⟨c, d⟩, hs, hv⟩
+    rcases (reached_iff n c d).mp hs with ⟨hc, hd⟩
+    subst c
+    change n + d / d = v at hv
+    rw [Nat.div_self hd] at hv
+    exact hv.symm
+  · rintro rfl
+    exact ⟨(n, 1), (reached_iff n n 1).mpr ⟨rfl, by decide⟩,
+      scalar_rewrite (n, 1) (by change 0 < 1; decide)⟩
+
+/-- The optimized expression has the same exact result, not merely an empty result set. -/
+theorem optimized_result (n v : ℕ) :
+    collectEval (reached n) .increment v ↔ v = n + 1 := by
+  rw [← hoisted_rewrite_all n]
+  exact collected_result n v
+
+/-- Both states and observable values genuinely change during the loop. -/
+theorem result_examples :
+    collectEval (reached 0) .withDivision 1 ∧
+    collectEval (reached 4) .withDivision 5 ∧
+    collectEval (reached 4) .increment 5 ∧
+    ¬ collectEval (reached 4) .withDivision 1 := by
+  simp only [collected_result, optimized_result]
+  decide
+
+/-- The unrestricted rewrite fails on a concrete singleton containing a zero divisor. -/
+theorem zero_divisor_rejected :
+    ¬ GuardedEquiv collectEval (fun _ => True) .withDivision .increment := by
+  intro h
+  have heq := h (fun s => s = (0, 0)) (fun _ _ => True.intro)
+  have hv : collectEval (fun s => s = (0, 0)) .withDivision 0 :=
+    ⟨(0, 0), rfl, by decide⟩
+  have hw : collectEval (fun s => s = (0, 0)) .increment 0 := heq ▸ hv
+  rcases hw with ⟨s, hs, hv⟩
+  subst s
+  change (1 : ℕ) = 0 at hv
+  cases hv
+
+/-- An intentionally invalid loop changes the divisor as well as the counter. -/
+def badStep (s : State) : State := (s.1 + 1, s.2 - 1)
+
+/-- Positivity would not be preserved by this different transition. -/
+theorem bad_step_not_invariant : ¬ IsLoopInvariant (stateTransfer badStep) positive := by
+  intro h
+  have hb := (invariant_iff badStep positive).mp h (0, 1) (by change 0 < 1; decide)
+  change 0 < 0 at hb
+  cases hb
+
+/-- A positive entry can pass the first iteration yet lose the rewrite after the second. -/
+theorem bad_step_trace :
+    let entered := init 2
+    let first := badStep entered
+    let second := badStep first
+    hoistLoopGuard (stateTransfer init) initial positive 2 ∧
+    first = (1, 1) ∧ second = (2, 0) ∧
+    scalarEval first .withDivision = 2 ∧ scalarEval first .increment = 2 ∧
+    scalarEval second .withDivision = 2 ∧ scalarEval second .increment = 3 := by
+  dsimp only
+  rw [entry_guard]
+  decide
+
+end Round11
 
 end CatSem.RedTeam
