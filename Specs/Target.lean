@@ -314,4 +314,172 @@ theorem stateTransfer_hoistLoopGuard_iterate_equiv (init : S₀ → S) (step : S
         (a₀ ⊓ hoistLoopGuard (stateTransfer init) a₀ inv)) t₂ := by
   sorry
 
+/-! ## Milestone 1: Executable Guarded Expression Optimizer & Concrete State Bridge -/
+
+/-- Computable Heyting guard synthesis on `GuardIR` syntax. -/
+def synthesizeGuardIR (a b : GuardIR) : GuardIR :=
+  sorry
+
+/-- Computable context-sensitive guarded expression optimizer on `Expr`. -/
+def optimizeExpr (ctx : GuardIR) (e : Expr) : Expr :=
+  sorry
+
+/-- Stage-to-Machine-State Bridge Equivalence: `GuardedEquiv (liftEval run) P t₁ t₂` holds
+    if and only if `t₁` and `t₂` produce identical concrete outcomes on every state satisfying `P`. -/
+theorem liftEval_guardedEquiv_iff {Out : Type*} (run : S → Term → Out)
+    (P : S → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (liftEval run) P t₁ t₂ ↔ ∀ s, P s → run s t₁ = run s t₂ := by
+  sorry
+
+/-- Denotational Compatibility of `Expr.add` with `liftEval evalExpr`. -/
+theorem exprAdd_compatibleOp2 :
+    CompatibleOp2 (liftEval evalExpr) Expr.add (liftBinarySem (fun x y => .val (x + y))) := by
+  sorry
+
+/-- Denotational Compatibility of `Expr.checkedDiv` with `liftEval evalExpr`. -/
+theorem exprCheckedDiv_compatibleOp2 :
+    CompatibleOp2 (liftEval evalExpr) Expr.checkedDiv
+      (liftBinarySem (fun x y => if y = 0 then .trap else .val (x / y))) := by
+  sorry
+
+/-- Categorical Realization of `synthesizeGuardIR`: Denotation commutes with abstract `synthesizeGuard`. -/
+theorem synthesizeGuardIR_denote (a b : GuardIR) :
+    denoteGuard (synthesizeGuardIR a b) = synthesizeGuard (denoteGuard a) (denoteGuard b) := by
+  sorry
+
+/-- Universal Property (Heyting Adjunction) of `synthesizeGuardIR` in `Env → Prop`. -/
+theorem synthesizeGuardIR_universal (a b : GuardIR) (g : Env → Prop) :
+    denoteGuard a ⊓ g ≤ denoteGuard b ↔ g ≤ denoteGuard (synthesizeGuardIR a b) := by
+  sorry
+
+/-- Syntactic Self-Discharge: Synthesizing a non-zero guard already present in context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_self (p : PureExpr) :
+    synthesizeGuardIR (.nonZero p) (.nonZero p) = .top := by
+  sorry
+
+/-- Stage-Guarded Soundness of `optimizeExpr` via `GuardedEquiv` and `liftEval`. -/
+theorem optimizeExpr_guardedEquiv (ctx : GuardIR) (e : Expr) :
+    GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (optimizeExpr ctx e) e := by
+  sorry
+
+/-- Concrete Operational Soundness of `optimizeExpr`: Whenever `evalGuard env ctx = true`,
+    the optimized expression evaluates to the exact same `Outcome` as the original expression. -/
+theorem optimizeExpr_sound (ctx : GuardIR) (e : Expr) (env : Env) :
+    evalGuard env ctx = true → evalExpr env (optimizeExpr ctx e) = evalExpr env e := by
+  sorry
+
+/-- Known-Context Check Elimination: Under context `v₀ ≠ 0`, `optimizeExpr` eliminates all
+    checked divisions, introduces zero runtime guard branches, and incurs zero runtime check cost. -/
+theorem optimizeExpr_known_ctx_elim (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+      guardBranchCount (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+      execCheckCost env (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 := by
+  sorry
+
+/-- Guarded Algebraic Cancellation: Under context `v₀ ≠ 0`, `(v₁ * v₀) / v₀` eliminates division completely. -/
+theorem optimizeExpr_cancel_div :
+    divOpCount (optimizeExpr (.nonZero (.var 0)) m1CancelExpr) = 0 := by
+  sorry
+
+/-- Unknown-Context Guard Deduplication: Under trivial context `.top`, `optimizeExpr` reduces
+    runtime check cost on `m1BenchExpr` from `2` down to at most `1` whenever `v₀ ≠ 0`. -/
+theorem optimizeExpr_unknown_ctx_dedup (env : Env) (h : env 0 ≠ 0) :
+    execCheckCost env (optimizeExpr .top m1BenchExpr) ≤ 1 ∧
+      execCheckCost env m1BenchExpr = 2 := by
+  sorry
+
+/-- Trap Preservation (Negative Safety Test): Under trivial context `.top`, when `v₀ = 0`,
+    `optimizeExpr .top m1BenchExpr` still safely traps rather than triggering `.ub` or fabricating a value. -/
+theorem optimizeExpr_zero_div_trap (env : Env) (h : env 0 = 0) :
+    evalExpr env (optimizeExpr .top m1BenchExpr) = .trap := by
+  sorry
+
+/-- Right-Top Residual Normalization: Synthesizing `.top` from any context `a` yields `.top`. -/
+theorem synthesizeGuardIR_top_right (a : GuardIR) :
+    synthesizeGuardIR a .top = .top := by
+  sorry
+
+/-- Left-Bottom Residual Normalization: Synthesizing any target `b` from inconsistent context `.bot` yields `.top`. -/
+theorem synthesizeGuardIR_bot_left (b : GuardIR) :
+    synthesizeGuardIR .bot b = .top := by
+  sorry
+
+/-- Top-Antecedent Atomic Normalization: Synthesizing `.nonZero p` from trivial context `.top`
+    returns `.nonZero p` directly rather than an unsimplified `.imp .top (.nonZero p)` wrapper. -/
+theorem synthesizeGuardIR_top_left_nonZero (p : PureExpr) :
+    synthesizeGuardIR .top (.nonZero p) = .nonZero p := by
+  sorry
+
+/-- Left Conjunctive Context Discharge: Synthesizing `.nonZero p` when `.nonZero p` appears on the
+    left of a conjunctive context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_conj_left (p : PureExpr) (rest : GuardIR) :
+    synthesizeGuardIR (.conj (.nonZero p) rest) (.nonZero p) = .top := by
+  sorry
+
+/-- Right Conjunctive Context Discharge: Synthesizing `.nonZero p` when `.nonZero p` appears on the
+    right of a conjunctive context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_conj_right (rest : GuardIR) (p : PureExpr) :
+    synthesizeGuardIR (.conj rest (.nonZero p)) (.nonZero p) = .top := by
+  sorry
+
+/-- Duplicate Conjunctive Target Normalization: Synthesizing `.conj (.nonZero p) (.nonZero p)` from
+    `.top` deduplicates the residual guard to `.nonZero p`. -/
+theorem synthesizeGuardIR_dedup_conj (p : PureExpr) :
+    synthesizeGuardIR .top (.conj (.nonZero p) (.nonZero p)) = .nonZero p := by
+  sorry
+
+/-- Parametric Checked-Division Elimination: For arbitrary pure operands `num, d` and extra context `extra`,
+    `optimizeExpr` eliminates `.checkedDiv (.pure num) (.pure d)` under `.nonZero d` and conjunctive
+    contexts containing `.nonZero d` with zero guard branches and zero runtime check cost. -/
+theorem optimizeExpr_elim_checkedDiv_param (num d : PureExpr) (extra : GuardIR) (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero d) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      checkedDivCount (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      checkedDivCount (optimizeExpr (.conj extra (.nonZero d)) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      guardBranchCount (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      execCheckCost env (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 := by
+  sorry
+
+/-- Parametric Guarded Algebraic Cancellation: Under `.nonZero d`, both `(x * d) / d` and `(d * x) / d`
+    eliminate division completely for arbitrary `PureExpr` operands `x, d`. -/
+theorem optimizeExpr_cancel_div_param (x d : PureExpr) :
+    divOpCount (optimizeExpr (.nonZero d) (mkCancelExpr x d)) = 0 ∧
+      divOpCount (optimizeExpr (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d))) = 0 := by
+  sorry
+
+/-- Binary Context Compositionality: If `optimizeExpr (.nonZero d)` eliminates all checked divisions
+    and introduces no guard branches on `e₁` and `e₂`, then it also eliminates all checked divisions on
+    `.add e₁ e₂`, `.sub e₁ e₂`, and `.mul e₁ e₂`. -/
+theorem optimizeExpr_compositional_binary (d : PureExpr) (e₁ e₂ : Expr)
+    (h₁ : checkedDivCount (optimizeExpr (.nonZero d) e₁) = 0 ∧
+          guardBranchCount (optimizeExpr (.nonZero d) e₁) = 0)
+    (h₂ : checkedDivCount (optimizeExpr (.nonZero d) e₂) = 0 ∧
+          guardBranchCount (optimizeExpr (.nonZero d) e₂) = 0) :
+    checkedDivCount (optimizeExpr (.nonZero d) (.add e₁ e₂)) = 0 ∧
+      checkedDivCount (optimizeExpr (.nonZero d) (.sub e₁ e₂)) = 0 ∧
+      checkedDivCount (optimizeExpr (.nonZero d) (.mul e₁ e₂)) = 0 := by
+  sorry
+
+/-- Parametric Known-Context Elimination: Under `.nonZero d`, `optimizeExpr` on `mkDualDivExpr x y d`
+    eliminates all checked divisions, introduces zero guard branches, and incurs zero runtime check cost. -/
+theorem optimizeExpr_known_ctx_elim_param (x y d : PureExpr) (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+      guardBranchCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+      execCheckCost env (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 := by
+  sorry
+
+/-- Parametric Unknown-Context Guard Deduplication: Under `.top`, for any `x, y, d` and `env` with
+    `evalPure env d ≠ 0`, `optimizeExpr` reduces runtime check cost on `mkDualDivExpr x y d` from `2` to `≤ 1`. -/
+theorem optimizeExpr_unknown_ctx_dedup_param (x y d : PureExpr) (env : Env)
+    (h : evalPure env d ≠ 0) :
+    execCheckCost env (optimizeExpr .top (mkDualDivExpr x y d)) ≤ 1 ∧
+      execCheckCost env (mkDualDivExpr x y d) = 2 := by
+  sorry
+
+/-- Parametric Trap Preservation: Under `.top`, for any `x, y, d` and `env` with `evalPure env d = 0`,
+    `optimizeExpr .top (mkDualDivExpr x y d)` safely traps. -/
+theorem optimizeExpr_zero_div_trap_param (x y d : PureExpr) (env : Env)
+    (h : evalPure env d = 0) :
+    evalExpr env (optimizeExpr .top (mkDualDivExpr x y d)) = .trap := by
+  sorry
+
 end CatSem

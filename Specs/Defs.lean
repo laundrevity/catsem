@@ -171,4 +171,235 @@ def stateTransfer {S₁ S₂ : Type*} (step : S₁ → S₂) : CFGTransfer (S₁
 example : (stateTransfer (fun n : ℕ => n + 1)).pullback (fun n => n > 0) 0 := by
   simp [stateTransfer]
 
+/-! ## Milestone 1: Trusted Computing Base (IR Syntax, Semantics, Bridges & Cost Observers) -/
+
+/-- Variable identifier in the expression IR. -/
+abbrev VarId := Nat
+
+/-- Concrete runtime environment mapping variables to integers. -/
+abbrev Env := VarId → Int
+
+/-- Pure total arithmetic sub-expressions (safe to evaluate inside guards without traps or UB). -/
+inductive PureExpr where
+  | lit (n : Int)
+  | var (v : VarId)
+  | add (e₁ e₂ : PureExpr)
+  | sub (e₁ e₂ : PureExpr)
+  | mul (e₁ e₂ : PureExpr)
+  deriving DecidableEq, Repr
+
+/-- Total operational evaluator for pure expressions. -/
+def evalPure (env : Env) : PureExpr → Int
+  | .lit n => n
+  | .var v => env v
+  | .add e₁ e₂ => evalPure env e₁ + evalPure env e₂
+  | .sub e₁ e₂ => evalPure env e₁ - evalPure env e₂
+  | .mul e₁ e₂ => evalPure env e₁ * evalPure env e₂
+
+/-- Executable Heyting guard IR predicates over `PureExpr`. -/
+inductive GuardIR where
+  | top
+  | bot
+  | nonZero (e : PureExpr)
+  | eq (e₁ e₂ : PureExpr)
+  | conj (g₁ g₂ : GuardIR)
+  | imp (g₁ g₂ : GuardIR)
+  deriving DecidableEq, Repr
+
+/-- Boolean runtime evaluator for `GuardIR`. -/
+def evalGuard (env : Env) : GuardIR → Bool
+  | .top => true
+  | .bot => false
+  | .nonZero e => decide (evalPure env e ≠ 0)
+  | .eq e₁ e₂ => decide (evalPure env e₁ = evalPure env e₂)
+  | .conj g₁ g₂ => evalGuard env g₁ && evalGuard env g₂
+  | .imp g₁ g₂ => (!evalGuard env g₁) || evalGuard env g₂
+
+/-- Denotation of a `GuardIR` syntax tree into the concrete Heyting fiber `Env → Prop`. -/
+def denoteGuard (g : GuardIR) : Env → Prop :=
+  fun env => evalGuard env g = true
+
+/-- Operational outcomes distinguishing normal values, safe checked-division traps, and unchecked UB. -/
+inductive Outcome where
+  | val (n : Int)
+  | trap
+  | ub
+  deriving DecidableEq, Repr
+
+/-- Left-to-right strict binary sequencing over `Outcome`. -/
+def bindOutcome2 (f : Int → Int → Outcome) (o₁ o₂ : Outcome) : Outcome :=
+  match o₁ with
+  | .val n₁ =>
+    match o₂ with
+    | .val n₂ => f n₁ n₂
+    | .trap => .trap
+    | .ub => .ub
+  | .trap => .trap
+  | .ub => .ub
+
+/-- Compiler expression IR with checked division, unchecked division, and runtime guard branches. -/
+inductive Expr where
+  | pure (p : PureExpr)
+  | add (e₁ e₂ : Expr)
+  | sub (e₁ e₂ : Expr)
+  | mul (e₁ e₂ : Expr)
+  | checkedDiv (num div : Expr)
+  | uncheckedDiv (num div : Expr)
+  | iteGuard (g : GuardIR) (thenBranch elseBranch : Expr)
+  deriving DecidableEq, Repr
+
+/-- Reference left-to-right operational evaluator for `Expr`.
+    Matches the left operand outcome before evaluating the right operand so Lean host
+    execution short-circuits on `.trap`/`.ub` identically to `execCheckCost`, while remaining
+    extensionally equal to `bindOutcome2`. -/
+def evalExpr (env : Env) : Expr → Outcome
+  | .pure p => .val (evalPure env p)
+  | .add e₁ e₂ =>
+    match evalExpr env e₁ with
+    | .val n₁ =>
+      match evalExpr env e₂ with
+      | .val n₂ => .val (n₁ + n₂)
+      | .trap => .trap
+      | .ub => .ub
+    | .trap => .trap
+    | .ub => .ub
+  | .sub e₁ e₂ =>
+    match evalExpr env e₁ with
+    | .val n₁ =>
+      match evalExpr env e₂ with
+      | .val n₂ => .val (n₁ - n₂)
+      | .trap => .trap
+      | .ub => .ub
+    | .trap => .trap
+    | .ub => .ub
+  | .mul e₁ e₂ =>
+    match evalExpr env e₁ with
+    | .val n₁ =>
+      match evalExpr env e₂ with
+      | .val n₂ => .val (n₁ * n₂)
+      | .trap => .trap
+      | .ub => .ub
+    | .trap => .trap
+    | .ub => .ub
+  | .checkedDiv num div =>
+    match evalExpr env num with
+    | .val n =>
+      match evalExpr env div with
+      | .val d => if d = 0 then .trap else .val (n / d)
+      | .trap => .trap
+      | .ub => .ub
+    | .trap => .trap
+    | .ub => .ub
+  | .uncheckedDiv num div =>
+    match evalExpr env num with
+    | .val n =>
+      match evalExpr env div with
+      | .val d => if d = 0 then .ub else .val (n / d)
+      | .trap => .trap
+      | .ub => .ub
+    | .trap => .trap
+    | .ub => .ub
+  | .iteGuard g t f =>
+    if evalGuard env g then evalExpr env t else evalExpr env f
+
+/-- Constructive stage-to-machine-state lifting bridge from a concrete evaluator `run : S → Term → Out`
+    to a stage-indexed relational denotation `(S → Prop) → Term → (S → Out → Prop)`. -/
+def liftEval {S Term Out : Type*} (run : S → Term → Out) (stage : S → Prop) (t : Term) :
+    S → Out → Prop :=
+  fun s out => stage s ∧ run s t = out
+
+/-- Relational semantic combiner for binary `Outcome` operations compatible with `liftEval`. -/
+def liftBinarySem (f : Int → Int → Outcome) (_stage : Env → Prop)
+    (v₁ v₂ : Env → Outcome → Prop) : Env → Outcome → Prop :=
+  fun env out => ∃ o₁ o₂, v₁ env o₁ ∧ v₂ env o₂ ∧ bindOutcome2 f o₁ o₂ = out
+
+/-- Static count of `.checkedDiv` AST nodes in an expression. -/
+def checkedDivCount : Expr → Nat
+  | .pure _ => 0
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ | .uncheckedDiv e₁ e₂ =>
+    checkedDivCount e₁ + checkedDivCount e₂
+  | .checkedDiv e₁ e₂ => 1 + checkedDivCount e₁ + checkedDivCount e₂
+  | .iteGuard _ t f => checkedDivCount t + checkedDivCount f
+
+/-- Static count of all division (`.checkedDiv` + `.uncheckedDiv`) AST nodes in an expression. -/
+def divOpCount : Expr → Nat
+  | .pure _ => 0
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ =>
+    divOpCount e₁ + divOpCount e₂
+  | .checkedDiv e₁ e₂ | .uncheckedDiv e₁ e₂ =>
+    1 + divOpCount e₁ + divOpCount e₂
+  | .iteGuard _ t f => divOpCount t + divOpCount f
+
+/-- Static count of `.iteGuard` AST nodes in an expression. -/
+def guardBranchCount : Expr → Nat
+  | .pure _ => 0
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ | .checkedDiv e₁ e₂ | .uncheckedDiv e₁ e₂ =>
+    guardBranchCount e₁ + guardBranchCount e₂
+  | .iteGuard _ t f => 1 + guardBranchCount t + guardBranchCount f
+
+/-- Dynamic short-circuiting cost of evaluating a `GuardIR` predicate in `env`. -/
+def guardEvalCost (env : Env) : GuardIR → Nat
+  | .top | .bot => 0
+  | .nonZero _ | .eq _ _ => 1
+  | .conj g₁ g₂ =>
+    guardEvalCost env g₁ + (if evalGuard env g₁ then guardEvalCost env g₂ else 0)
+  | .imp g₁ g₂ =>
+    guardEvalCost env g₁ + (if evalGuard env g₁ then guardEvalCost env g₂ else 0)
+
+/-- Dynamic cost of runtime safety checks executed during left-to-right evaluation of `Expr` in `env`.
+    Models abstract object-IR guard and division-check evaluations (short-circuiting right-hand
+    checks whenever the left operand traps or triggers UB). -/
+def execCheckCost (env : Env) : Expr → Nat
+  | .pure _ => 0
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ | .uncheckedDiv e₁ e₂ =>
+    execCheckCost env e₁ +
+      (match evalExpr env e₁ with
+       | .val _ => execCheckCost env e₂
+       | _ => 0)
+  | .checkedDiv e₁ e₂ =>
+    execCheckCost env e₁ +
+      (match evalExpr env e₁ with
+       | .val _ =>
+         execCheckCost env e₂ +
+           (if match evalExpr env e₂ with | .val _ => true | _ => false then 1 else 0)
+       | _ => 0)
+  | .iteGuard g t f =>
+    guardEvalCost env g +
+      (if evalGuard env g then execCheckCost env t else execCheckCost env f)
+
+/-- Parametric guarded-cancellation expression `(x * d) / d` over arbitrary `PureExpr` operands. -/
+def mkCancelExpr (x d : PureExpr) : Expr :=
+  .checkedDiv (.mul (.pure x) (.pure d)) (.pure d)
+
+/-- Parametric dual-division benchmark expression `(x / d) + ((y * d) / d)` over arbitrary `PureExpr` operands. -/
+def mkDualDivExpr (x y d : PureExpr) : Expr :=
+  .add (.checkedDiv (.pure x) (.pure d)) (.checkedDiv (.mul (.pure y) (.pure d)) (.pure d))
+
+/-- Milestone 1 benchmark expression `(v₁ * v₀) / v₀` testing guarded algebraic cancellation. -/
+def m1CancelExpr : Expr :=
+  .checkedDiv (.mul (.pure (.var 1)) (.pure (.var 0))) (.pure (.var 0))
+
+/-- Milestone 1 benchmark expression `(v₁ / v₀) + ((v₂ * v₀) / v₀)` testing redundant check elimination. -/
+def m1BenchExpr : Expr :=
+  .add
+    (.checkedDiv (.pure (.var 1)) (.pure (.var 0)))
+    (.checkedDiv (.mul (.pure (.var 2)) (.pure (.var 0))) (.pure (.var 0)))
+
+-- Sanity checks on Milestone 1 TCB evaluators, parametric builders, and cost observers
+example : m1CancelExpr = mkCancelExpr (.var 1) (.var 0) := rfl
+example : m1BenchExpr = mkDualDivExpr (.var 1) (.var 2) (.var 0) := rfl
+example (env : Env) (e₁ e₂ : Expr) :
+    evalExpr env (.add e₁ e₂) =
+      bindOutcome2 (fun x y => .val (x + y)) (evalExpr env e₁) (evalExpr env e₂) := rfl
+example (env : Env) (num div : Expr) :
+    evalExpr env (.checkedDiv num div) =
+      bindOutcome2 (fun n d => if d = 0 then .trap else .val (n / d))
+        (evalExpr env num) (evalExpr env div) := rfl
+example : evalExpr (fun _ => 0) m1BenchExpr = .trap := rfl
+example : evalExpr (fun v => if v = 0 then 2 else 6) m1CancelExpr = .val 6 := rfl
+example : checkedDivCount m1BenchExpr = 2 := rfl
+example : divOpCount m1CancelExpr = 1 := rfl
+example : guardBranchCount m1BenchExpr = 0 := rfl
+example : execCheckCost (fun _ => 2) m1BenchExpr = 2 := rfl
+
 end CatSem

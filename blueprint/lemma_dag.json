@@ -315,6 +315,221 @@
         "guardedEquiv_hoistLoopGuard_iterate"
       ],
       "informal_claim": "For concrete transitions init : S0 -> S and step : S -> S, if IsInductiveFor (stateTransfer step) inv q and GuardedEquiv eval q t1 t2, then the hoisted preheader guard guarantees eval equality across all n iterations."
+    },
+    {
+      "id": "synthesizeGuardIR",
+      "status": "spec_locked",
+      "informal_claim": "Computable Heyting guard synthesis function on GuardIR syntax."
+    },
+    {
+      "id": "optimizeExpr",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "Computable context-sensitive guarded expression optimizer on Expr."
+    },
+    {
+      "id": "liftEval_guardedEquiv_iff",
+      "status": "spec_locked",
+      "informal_claim": "GuardedEquiv (liftEval run) P t1 t2 iff forall s, P s -> run s t1 = run s t2."
+    },
+    {
+      "id": "exprAdd_compatibleOp2",
+      "status": "spec_locked",
+      "informal_claim": "Expr.add is denotationally compatible (CompatibleOp2) with liftEval evalExpr and liftBinarySem (+)."
+    },
+    {
+      "id": "exprCheckedDiv_compatibleOp2",
+      "status": "spec_locked",
+      "informal_claim": "Expr.checkedDiv is denotationally compatible (CompatibleOp2) with liftEval evalExpr and liftBinarySem checked-division."
+    },
+    {
+      "id": "synthesizeGuardIR_denote",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "denoteGuard (synthesizeGuardIR a b) = synthesizeGuard (denoteGuard a) (denoteGuard b)."
+    },
+    {
+      "id": "synthesizeGuardIR_universal",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR_denote",
+        "synthesizeGuard_adjunction"
+      ],
+      "informal_claim": "denoteGuard a meet g <= denoteGuard b iff g <= denoteGuard (synthesizeGuardIR a b)."
+    },
+    {
+      "id": "synthesizeGuardIR_discharge_self",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "synthesizeGuardIR (.nonZero p) (.nonZero p) = .top."
+    },
+    {
+      "id": "optimizeExpr_guardedEquiv",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "liftEval_guardedEquiv_iff",
+        "exprAdd_compatibleOp2",
+        "exprCheckedDiv_compatibleOp2",
+        "guardedEquiv_congr2",
+        "synthesizeGuardIR_universal"
+      ],
+      "informal_claim": "GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (optimizeExpr ctx e) e."
+    },
+    {
+      "id": "optimizeExpr_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr_guardedEquiv",
+        "liftEval_guardedEquiv_iff"
+      ],
+      "informal_claim": "If evalGuard env ctx = true, then evalExpr env (optimizeExpr ctx e) = evalExpr env e."
+    },
+    {
+      "id": "optimizeExpr_known_ctx_elim",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "synthesizeGuardIR_discharge_self"
+      ],
+      "informal_claim": "Under context nonZero (var 0), optimizeExpr on m1BenchExpr achieves checkedDivCount = 0, guardBranchCount = 0, and execCheckCost = 0."
+    },
+    {
+      "id": "optimizeExpr_cancel_div",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "synthesizeGuardIR_discharge_self"
+      ],
+      "informal_claim": "Under context nonZero (var 0), optimizeExpr on m1CancelExpr achieves divOpCount = 0."
+    },
+    {
+      "id": "optimizeExpr_unknown_ctx_dedup",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr"
+      ],
+      "informal_claim": "Under trivial context .top when env 0 != 0, optimizeExpr on m1BenchExpr reduces execCheckCost from 2 to at most 1."
+    },
+    {
+      "id": "optimizeExpr_zero_div_trap",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr_sound"
+      ],
+      "informal_claim": "Under trivial context .top when env 0 = 0, evalExpr env (optimizeExpr .top m1BenchExpr) = .trap."
+    },
+    {
+      "id": "synthesizeGuardIR_top_right",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For any GuardIR context a, synthesizeGuardIR a .top = .top."
+    },
+    {
+      "id": "synthesizeGuardIR_bot_left",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For any target GuardIR b, synthesizeGuardIR .bot b = .top."
+    },
+    {
+      "id": "synthesizeGuardIR_top_left_nonZero",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For any PureExpr p, synthesizeGuardIR .top (.nonZero p) = .nonZero p."
+    },
+    {
+      "id": "synthesizeGuardIR_discharge_conj_left",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For any PureExpr p and GuardIR rest, synthesizeGuardIR (.conj (.nonZero p) rest) (.nonZero p) = .top."
+    },
+    {
+      "id": "synthesizeGuardIR_discharge_conj_right",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For any GuardIR rest and PureExpr p, synthesizeGuardIR (.conj rest (.nonZero p)) (.nonZero p) = .top."
+    },
+    {
+      "id": "synthesizeGuardIR_dedup_conj",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeGuardIR",
+        "synthesizeGuardIR_top_left_nonZero"
+      ],
+      "informal_claim": "For any PureExpr p, synthesizeGuardIR .top (.conj (.nonZero p) (.nonZero p)) = .nonZero p."
+    },
+    {
+      "id": "optimizeExpr_elim_checkedDiv_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "synthesizeGuardIR_discharge_self",
+        "synthesizeGuardIR_discharge_conj_left",
+        "synthesizeGuardIR_discharge_conj_right"
+      ],
+      "informal_claim": "For arbitrary PureExpr operands num, d and extra context extra, optimizeExpr eliminates .checkedDiv (.pure num) (.pure d) under .nonZero d, .conj (.nonZero d) extra, and .conj extra (.nonZero d) with zero guard branches and zero runtime check cost."
+    },
+    {
+      "id": "optimizeExpr_cancel_div_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "synthesizeGuardIR_discharge_self"
+      ],
+      "informal_claim": "For arbitrary PureExpr operands x, d, optimizeExpr (.nonZero d) eliminates all division operations in both mkCancelExpr x d and (d * x) / d."
+    },
+    {
+      "id": "optimizeExpr_compositional_binary",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr"
+      ],
+      "informal_claim": "If optimizeExpr (.nonZero d) achieves checkedDivCount = 0 and guardBranchCount = 0 on subexpressions e1 and e2, then it achieves checkedDivCount = 0 on .add e1 e2, .sub e1 e2, and .mul e1 e2."
+    },
+    {
+      "id": "optimizeExpr_known_ctx_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr_elim_checkedDiv_param",
+        "optimizeExpr_cancel_div_param",
+        "optimizeExpr_compositional_binary"
+      ],
+      "informal_claim": "For arbitrary PureExpr operands x, y, d and environment env, optimizeExpr (.nonZero d) (mkDualDivExpr x y d) achieves checkedDivCount = 0, guardBranchCount = 0, and execCheckCost = 0."
+    },
+    {
+      "id": "optimizeExpr_unknown_ctx_dedup_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr",
+        "synthesizeGuardIR_dedup_conj",
+        "optimizeExpr_elim_checkedDiv_param",
+        "optimizeExpr_cancel_div_param"
+      ],
+      "informal_claim": "For arbitrary PureExpr operands x, y, d and environment env with evalPure env d != 0, optimizeExpr .top (mkDualDivExpr x y d) reduces execCheckCost from 2 to at most 1."
+    },
+    {
+      "id": "optimizeExpr_zero_div_trap_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeExpr_sound"
+      ],
+      "informal_claim": "For arbitrary PureExpr operands x, y, d and environment env with evalPure env d = 0, evalExpr env (optimizeExpr .top (mkDualDivExpr x y d)) = .trap."
     }
   ]
 }

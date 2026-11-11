@@ -374,4 +374,1171 @@ theorem stateTransfer_hoistLoopGuard_iterate_equiv (init : S₀ → S) (step : S
   exact guardedEquiv_hoistLoopGuard_iterate (stateTransfer init) (stateTransfer step)
     eval a₀ inv q t₁ t₂ hind heq n
 
+/-! ## Milestone 1: Executable Guarded Expression Optimizer & Concrete State Bridge -/
+
+/-! ### Guard normalisation (implementation of `synthesizeGuardIR`)
+
+Atoms (`.nonZero`, `.eq`) are treated as opaque propositional variables: no arithmetic
+reasoning or constant folding is performed. A context is read as the list of its conjuncts
+("hypotheses"); a target is simplified by dropping every conjunct that is already a
+hypothesis. -/
+
+/-- `g` is syntactically `.top`. -/
+private def GuardIR.isTop : GuardIR → Bool
+  | .top => true
+  | _ => false
+
+/-- `g` is syntactically `.bot`. -/
+private def GuardIR.isBot : GuardIR → Bool
+  | .bot => true
+  | _ => false
+
+/-- Conjunction with unit `.top` and absorbing element `.bot`. -/
+private def GuardIR.mkConj (g₁ g₂ : GuardIR) : GuardIR :=
+  match g₁, g₂ with
+  | .top, g => g
+  | g, .top => g
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | g₁, g₂ => .conj g₁ g₂
+
+/-- Implication with the trivial cases `g ⇨ ⊤ = ⊤`, `⊤ ⇨ g = g` and `⊥ ⇨ g = ⊤` folded away. -/
+private def GuardIR.mkImp (g₁ g₂ : GuardIR) : GuardIR :=
+  match g₁, g₂ with
+  | _, .top => .top
+  | .top, g => g
+  | .bot, _ => .top
+  | g₁, g₂ => .imp g₁ g₂
+
+/-- Context-free normal form: rebuilds every `.conj` / `.imp` with the smart constructors. -/
+private def GuardIR.nf : GuardIR → GuardIR
+  | .conj g₁ g₂ => GuardIR.mkConj (GuardIR.nf g₁) (GuardIR.nf g₂)
+  | .imp g₁ g₂ => GuardIR.mkImp (GuardIR.nf g₁) (GuardIR.nf g₂)
+  | g => g
+
+/-- `hasHyp ctx h`: `h` is literally one of the conjuncts of `ctx`, or `ctx` contains the
+    conjunct `.bot` (ex falso). -/
+private def GuardIR.hasHyp : GuardIR → GuardIR → Bool
+  | .top, _ => false
+  | .bot, _ => true
+  | .conj c₁ c₂, h => GuardIR.hasHyp c₁ h || GuardIR.hasHyp c₂ h
+  | c, h => decide (c = h)
+
+/-- `residual ctx g`: what is left of the target `g` once every conjunct that is already a
+    hypothesis of `ctx` (or of an earlier conjunct of `g`) has been discharged. -/
+private def GuardIR.residual : GuardIR → GuardIR → GuardIR
+  | _, .top => .top
+  | ctx, .conj g₁ g₂ =>
+    GuardIR.mkConj (GuardIR.residual ctx g₁) (GuardIR.residual (.conj ctx g₁) g₂)
+  | ctx, .imp g₁ g₂ =>
+    if GuardIR.hasHyp ctx (.imp g₁ g₂) then .top
+    else GuardIR.mkImp g₁ (GuardIR.residual (.conj ctx g₁) g₂)
+  | ctx, g => if GuardIR.hasHyp ctx g then .top else g
+
+/-- `g` simplified relative to the context `ctx`; equivalent to `g` wherever `ctx` holds. -/
+private def GuardIR.simplifyUnder (ctx g : GuardIR) : GuardIR :=
+  GuardIR.residual (GuardIR.nf ctx) (GuardIR.nf g)
+
+/-- `ctx` syntactically entails `g`: nothing of `g` is left once the hypotheses of `ctx` have
+    been discharged. Equivalently (`GuardIR.entails_eq`), the residual guard
+    `synthesizeGuardIR ctx g` is `.top`. -/
+private def GuardIR.entails (ctx g : GuardIR) : Bool :=
+  GuardIR.isTop (GuardIR.simplifyUnder ctx g)
+
+/-- `hyp ⇨ r` for a residual `r ≠ ⊤`, without an `.imp .top _` wrapper. -/
+private def GuardIR.wrapImp (hyp r : GuardIR) : GuardIR :=
+  match hyp with
+  | .top => r
+  | hyp => .imp hyp r
+
+/-- Computable Heyting guard synthesis on `GuardIR` syntax. -/
+def synthesizeGuardIR (a b : GuardIR) : GuardIR :=
+  match GuardIR.simplifyUnder a b with
+  | .top => .top
+  | r => GuardIR.wrapImp (GuardIR.residual .top (GuardIR.nf a)) r
+
+/-! ### Expression rewriting (implementation of `optimizeExpr`) -/
+
+/-- If `num` is syntactically `x * d` or `d * x`, the cofactor `x`. -/
+private def PureExpr.cancelFactor? (num d : PureExpr) : Option PureExpr :=
+  match num with
+  | .mul a b => if b = d then some a else if a = d then some b else none
+  | _ => none
+
+/-- The pure arithmetic expression computed by `e`, if `e` contains neither divisions nor
+    guard branches. -/
+private def Expr.asPure? : Expr → Option PureExpr
+  | .pure p => some p
+  | .add e₁ e₂ =>
+    match Expr.asPure? e₁, Expr.asPure? e₂ with
+    | some p₁, some p₂ => some (.add p₁ p₂)
+    | _, _ => none
+  | .sub e₁ e₂ =>
+    match Expr.asPure? e₁, Expr.asPure? e₂ with
+    | some p₁, some p₂ => some (.sub p₁ p₂)
+    | _, _ => none
+  | .mul e₁ e₂ =>
+    match Expr.asPure? e₁, Expr.asPure? e₂ with
+    | some p₁, some p₂ => some (.mul p₁ p₂)
+    | _, _ => none
+  | _ => none
+
+/-- Facts that hold in every environment in which `e` evaluates to a value: each division
+    executed on the way has a non-zero divisor (a zero divisor yields `.trap` or `.ub`). -/
+private def Expr.postFacts : Expr → GuardIR
+  | .pure _ => .top
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ => .conj (Expr.postFacts e₁) (Expr.postFacts e₂)
+  | .checkedDiv n d | .uncheckedDiv n d =>
+    .conj (.conj (Expr.postFacts n) (Expr.postFacts d))
+      (match Expr.asPure? d with
+       | some pd => .nonZero pd
+       | none => .top)
+  | .iteGuard _ _ _ => .top
+
+/-- Rebuilds a binary arithmetic node, fusing two pure operands into one pure expression. -/
+private def Expr.mkBin (pureOp : PureExpr → PureExpr → PureExpr)
+    (exprOp : Expr → Expr → Expr) (e₁ e₂ : Expr) : Expr :=
+  match e₁, e₂ with
+  | .pure p₁, .pure p₂ => .pure (pureOp p₁ p₂)
+  | _, _ => exprOp e₁ e₂
+
+/-- The division node of the original kind (`true` = checked, `false` = unchecked). -/
+private def Expr.rawDiv : Bool → Expr → Expr → Expr
+  | true, n, d => .checkedDiv n d
+  | false, n, d => .uncheckedDiv n d
+
+/-- Division by a pure divisor `pd` that is known to be non-zero: cancels `(x * pd) / pd` and
+    `(pd * x) / pd` to `x`, and otherwise emits an unchecked division. -/
+private def Expr.mkSafeDiv (n : Expr) (pd : PureExpr) : Expr :=
+  match n with
+  | .pure pn =>
+    match PureExpr.cancelFactor? pn pd with
+    | some x => .pure x
+    | none => .uncheckedDiv (.pure pn) (.pure pd)
+  | n => .uncheckedDiv n (.pure pd)
+
+/-- Rebuilds a division node. `known` collects the facts available once both operands have
+    evaluated to values; the zero check is dropped exactly when `known` entails that the pure
+    divisor `pd` is non-zero, i.e. when the residual guard
+    `synthesizeGuardIR known (.nonZero pd)` is trivial. -/
+private def Expr.mkDiv (checked : Bool) (known : GuardIR) (n d : Expr) : Expr :=
+  match d with
+  | .pure pd =>
+    if GuardIR.entails known (.nonZero pd) then Expr.mkSafeDiv n pd
+    else Expr.rawDiv checked n (.pure pd)
+  | d => Expr.rawDiv checked n d
+
+/-- Rebuilds a guard branch: a statically false guard selects the else-branch, a guard whose
+    residual `g` under the context is `.top` selects the then-branch. -/
+private def Expr.mkIte (staticFalse : Bool) (g : GuardIR) (t f : Expr) : Expr :=
+  match staticFalse, g with
+  | true, _ => f
+  | false, .top => t
+  | false, g => .iteGuard g t f
+
+/-- Computable context-sensitive guarded expression optimizer on `Expr`. -/
+def optimizeExpr (ctx : GuardIR) (e : Expr) : Expr :=
+  match e with
+  | .pure p => .pure p
+  | .add e₁ e₂ =>
+    Expr.mkBin .add .add (optimizeExpr ctx e₁)
+      (optimizeExpr (.conj ctx (Expr.postFacts e₁)) e₂)
+  | .sub e₁ e₂ =>
+    Expr.mkBin .sub .sub (optimizeExpr ctx e₁)
+      (optimizeExpr (.conj ctx (Expr.postFacts e₁)) e₂)
+  | .mul e₁ e₂ =>
+    Expr.mkBin .mul .mul (optimizeExpr ctx e₁)
+      (optimizeExpr (.conj ctx (Expr.postFacts e₁)) e₂)
+  | .checkedDiv n d =>
+    Expr.mkDiv true (.conj (.conj ctx (Expr.postFacts n)) (Expr.postFacts d))
+      (optimizeExpr ctx n) (optimizeExpr (.conj ctx (Expr.postFacts n)) d)
+  | .uncheckedDiv n d =>
+    Expr.mkDiv false (.conj (.conj ctx (Expr.postFacts n)) (Expr.postFacts d))
+      (optimizeExpr ctx n) (optimizeExpr (.conj ctx (Expr.postFacts n)) d)
+  | .iteGuard g t f =>
+    Expr.mkIte (GuardIR.isBot (GuardIR.nf g)) (GuardIR.simplifyUnder ctx g)
+      (optimizeExpr (.conj ctx g) t) (optimizeExpr (.conj ctx (.imp g .bot)) f)
+
+/-- Stage-to-Machine-State Bridge Equivalence: `GuardedEquiv (liftEval run) P t₁ t₂` holds
+    if and only if `t₁` and `t₂` produce identical concrete outcomes on every state satisfying `P`. -/
+theorem liftEval_guardedEquiv_iff {Out : Type*} (run : S → Term → Out)
+    (P : S → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (liftEval run) P t₁ t₂ ↔ ∀ s, P s → run s t₁ = run s t₂ := by
+  constructor
+  · intro h s hs
+    have hP : liftEval run P t₁ = liftEval run P t₂ := h P (le_refl P)
+    have hEq : (P s ∧ run s t₁ = run s t₁) = (P s ∧ run s t₂ = run s t₁) :=
+      congrFun (congrFun hP s) (run s t₁)
+    exact (hEq ▸ And.intro hs rfl).2.symm
+  · intro h stage hst
+    funext s out
+    apply propext
+    show (stage s ∧ run s t₁ = out) ↔ (stage s ∧ run s t₂ = out)
+    constructor
+    · rintro ⟨hs, he⟩
+      exact ⟨hs, (h s (hst s hs)) ▸ he⟩
+    · rintro ⟨hs, he⟩
+      exact ⟨hs, (h s (hst s hs)).symm ▸ he⟩
+
+/-- Denotational Compatibility of `Expr.add` with `liftEval evalExpr`. -/
+theorem exprAdd_compatibleOp2 :
+    CompatibleOp2 (liftEval evalExpr) Expr.add (liftBinarySem (fun x y => .val (x + y))) := by
+  intro stage e₁ e₂
+  funext env out
+  apply propext
+  show (stage env ∧ evalExpr env (.add e₁ e₂) = out) ↔
+    ∃ o₁ o₂, (stage env ∧ evalExpr env e₁ = o₁) ∧ (stage env ∧ evalExpr env e₂ = o₂) ∧
+      bindOutcome2 (fun x y => .val (x + y)) o₁ o₂ = out
+  constructor
+  · rintro ⟨hs, he⟩
+    exact ⟨_, _, ⟨hs, rfl⟩, ⟨hs, rfl⟩, he⟩
+  · rintro ⟨o₁, o₂, ⟨hs, h₁⟩, ⟨-, h₂⟩, hb⟩
+    subst h₁ h₂
+    exact ⟨hs, hb⟩
+
+/-- Denotational Compatibility of `Expr.checkedDiv` with `liftEval evalExpr`. -/
+theorem exprCheckedDiv_compatibleOp2 :
+    CompatibleOp2 (liftEval evalExpr) Expr.checkedDiv
+      (liftBinarySem (fun x y => if y = 0 then .trap else .val (x / y))) := by
+  intro stage e₁ e₂
+  funext env out
+  apply propext
+  show (stage env ∧ evalExpr env (.checkedDiv e₁ e₂) = out) ↔
+    ∃ o₁ o₂, (stage env ∧ evalExpr env e₁ = o₁) ∧ (stage env ∧ evalExpr env e₂ = o₂) ∧
+      bindOutcome2 (fun x y => if y = 0 then .trap else .val (x / y)) o₁ o₂ = out
+  constructor
+  · rintro ⟨hs, he⟩
+    exact ⟨_, _, ⟨hs, rfl⟩, ⟨hs, rfl⟩, he⟩
+  · rintro ⟨o₁, o₂, ⟨hs, h₁⟩, ⟨-, h₂⟩, hb⟩
+    subst h₁ h₂
+    exact ⟨hs, hb⟩
+
+/-! ### Semantics of the guard normaliser -/
+
+private theorem GuardIR.isTop_iff {g : GuardIR} : GuardIR.isTop g = true ↔ g = .top := by
+  cases g <;> simp [GuardIR.isTop]
+
+private theorem GuardIR.isBot_iff {g : GuardIR} : GuardIR.isBot g = true ↔ g = .bot := by
+  cases g <;> simp [GuardIR.isBot]
+
+private theorem GuardIR.evalGuard_mkConj (env : Env) (g₁ g₂ : GuardIR) :
+    evalGuard env (GuardIR.mkConj g₁ g₂) = (evalGuard env g₁ && evalGuard env g₂) := by
+  cases g₁ <;> cases g₂ <;> simp [GuardIR.mkConj, evalGuard]
+
+private theorem GuardIR.evalGuard_mkImp (env : Env) (g₁ g₂ : GuardIR) :
+    evalGuard env (GuardIR.mkImp g₁ g₂) = (!evalGuard env g₁ || evalGuard env g₂) := by
+  cases g₁ <;> cases g₂ <;> simp [GuardIR.mkImp, evalGuard]
+
+private theorem GuardIR.evalGuard_nf (env : Env) (g : GuardIR) :
+    evalGuard env (GuardIR.nf g) = evalGuard env g := by
+  induction g with
+  | conj g₁ g₂ ih₁ ih₂ => simp only [GuardIR.nf, GuardIR.evalGuard_mkConj, evalGuard, ih₁, ih₂]
+  | imp g₁ g₂ ih₁ ih₂ => simp only [GuardIR.nf, GuardIR.evalGuard_mkImp, evalGuard, ih₁, ih₂]
+  | _ => rfl
+
+private theorem GuardIR.evalGuard_conj_intro {env : Env} {a b : GuardIR}
+    (ha : evalGuard env a = true) (hb : evalGuard env b = true) :
+    evalGuard env (.conj a b) = true := by
+  simp only [evalGuard, ha, hb, Bool.and_self]
+
+/-- A hypothesis of a context holds wherever the context holds. -/
+private theorem GuardIR.hasHyp_sound {env : Env} {c h : GuardIR}
+    (hh : GuardIR.hasHyp c h = true) (hc : evalGuard env c = true) :
+    evalGuard env h = true := by
+  induction c with
+  | top => exact absurd hh (by simp [GuardIR.hasHyp])
+  | bot => exact absurd hc (by simp [evalGuard])
+  | conj c₁ c₂ ih₁ ih₂ =>
+    simp only [evalGuard, Bool.and_eq_true] at hc
+    simp only [GuardIR.hasHyp, Bool.or_eq_true] at hh
+    rcases hh with hh | hh
+    · exact ih₁ hh hc.1
+    · exact ih₂ hh hc.2
+  | _ => exact (of_decide_eq_true hh) ▸ hc
+
+private theorem GuardIR.hasHyp_mkConj (g₁ g₂ h : GuardIR) :
+    GuardIR.hasHyp (GuardIR.mkConj g₁ g₂) h = (GuardIR.hasHyp g₁ h || GuardIR.hasHyp g₂ h) := by
+  cases g₁ <;> cases g₂ <;> simp [GuardIR.mkConj, GuardIR.hasHyp]
+
+/-- Ex falso: a context with the hypothesis `.bot` has every hypothesis. -/
+private theorem GuardIR.hasHyp_of_bot {c : GuardIR} (hb : GuardIR.hasHyp c .bot = true)
+    (h : GuardIR) : GuardIR.hasHyp c h = true := by
+  induction c with
+  | top => exact absurd hb (by simp [GuardIR.hasHyp])
+  | bot => rfl
+  | conj c₁ c₂ ih₁ ih₂ =>
+    simp only [GuardIR.hasHyp, Bool.or_eq_true] at hb ⊢
+    exact hb.imp ih₁ ih₂
+  | _ => exact absurd hb (by simp [GuardIR.hasHyp])
+
+private theorem GuardIR.mkConj_top_right (g : GuardIR) : GuardIR.mkConj g .top = g := by
+  cases g <;> rfl
+
+private theorem GuardIR.mkImp_top_right (g : GuardIR) : GuardIR.mkImp g .top = .top := by
+  cases g <;> rfl
+
+private theorem GuardIR.mkImp_bot_left (g : GuardIR) : GuardIR.mkImp .bot g = .top := by
+  cases g <;> rfl
+
+private theorem GuardIR.mkConj_eq_top {g₁ g₂ : GuardIR} (h : GuardIR.mkConj g₁ g₂ = .top) :
+    g₁ = .top ∧ g₂ = .top := by
+  cases g₁ <;> cases g₂ <;> simp [GuardIR.mkConj] at h ⊢
+
+private theorem GuardIR.mkImp_eq_top {g₁ g₂ : GuardIR} (h : GuardIR.mkImp g₁ g₂ = .top) :
+    g₂ = .top ∨ g₁ = .bot := by
+  cases g₁ <;> cases g₂ <;> simp [GuardIR.mkImp] at h ⊢
+
+private theorem GuardIR.residual_of_hasHyp_bot {c : GuardIR}
+    (hb : GuardIR.hasHyp c .bot = true) (g : GuardIR) : GuardIR.residual c g = .top := by
+  induction g generalizing c with
+  | top => rfl
+  | conj g₁ g₂ ih₁ ih₂ =>
+    have h₂ : GuardIR.hasHyp (.conj c g₁) .bot = true := by
+      simp only [GuardIR.hasHyp, hb, Bool.true_or]
+    simp only [GuardIR.residual, ih₁ hb, ih₂ h₂]
+    rfl
+  | imp g₁ g₂ _ _ => simp only [GuardIR.residual, GuardIR.hasHyp_of_bot hb, ↓reduceIte]
+  | _ => simp only [GuardIR.residual, GuardIR.hasHyp_of_bot hb, ↓reduceIte]
+
+/-- Wherever the context holds, the residual evaluates exactly like the original target. -/
+private theorem GuardIR.evalGuard_residual {env : Env} {c : GuardIR}
+    (hc : evalGuard env c = true) (g : GuardIR) :
+    evalGuard env (GuardIR.residual c g) = evalGuard env g := by
+  induction g generalizing c with
+  | top => rfl
+  | conj g₁ g₂ ih₁ ih₂ =>
+    simp only [GuardIR.residual, GuardIR.evalGuard_mkConj, evalGuard, ih₁ hc]
+    cases h₁ : evalGuard env g₁ with
+    | false => rfl
+    | true => rw [ih₂ (GuardIR.evalGuard_conj_intro hc h₁)]
+  | imp g₁ g₂ _ ih₂ =>
+    simp only [GuardIR.residual]
+    split
+    · next hh => exact (GuardIR.hasHyp_sound hh hc).symm
+    · simp only [GuardIR.evalGuard_mkImp, evalGuard]
+      cases h₁ : evalGuard env g₁ with
+      | false => rfl
+      | true => rw [ih₂ (GuardIR.evalGuard_conj_intro hc h₁)]
+  | _ =>
+    simp only [GuardIR.residual]
+    split
+    · next hh => exact (GuardIR.hasHyp_sound hh hc).symm
+    · rfl
+
+/-- A target that is fully discharged stays discharged when the context gains hypotheses. -/
+private theorem GuardIR.residual_top_mono {c c' : GuardIR}
+    (hle : ∀ h, GuardIR.hasHyp c h = true → GuardIR.hasHyp c' h = true) (g : GuardIR)
+    (hg : GuardIR.residual c g = .top) : GuardIR.residual c' g = .top := by
+  induction g generalizing c c' with
+  | top => rfl
+  | conj g₁ g₂ ih₁ ih₂ =>
+    simp only [GuardIR.residual] at hg ⊢
+    obtain ⟨h₁, h₂⟩ := GuardIR.mkConj_eq_top hg
+    have hle' : ∀ h, GuardIR.hasHyp (.conj c g₁) h = true →
+        GuardIR.hasHyp (.conj c' g₁) h = true := by
+      intro h
+      simp only [GuardIR.hasHyp, Bool.or_eq_true]
+      exact Or.imp_left (hle h)
+    rw [ih₁ hle h₁, ih₂ hle' h₂]
+    rfl
+  | imp g₁ g₂ _ ih₂ =>
+    simp only [GuardIR.residual] at hg ⊢
+    have hle' : ∀ h, GuardIR.hasHyp (.conj c g₁) h = true →
+        GuardIR.hasHyp (.conj c' g₁) h = true := by
+      intro h
+      simp only [GuardIR.hasHyp, Bool.or_eq_true]
+      exact Or.imp_left (hle h)
+    split at hg
+    · next hh => rw [ite_eq_left (hle _ hh)]
+    · split
+      · rfl
+      · rcases GuardIR.mkImp_eq_top hg with h₂ | h₁
+        · rw [ih₂ hle' h₂, GuardIR.mkImp_top_right]
+        · subst h₁
+          exact GuardIR.mkImp_bot_left _
+  | _ =>
+    simp only [GuardIR.residual] at hg ⊢
+    split at hg
+    · next hh => rw [ite_eq_left (hle _ hh)]
+    · exact absurd hg (by simp)
+
+private theorem GuardIR.evalGuard_wrapImp (env : Env) (hyp r : GuardIR) :
+    evalGuard env (GuardIR.wrapImp hyp r) = (!evalGuard env hyp || evalGuard env r) := by
+  cases hyp <;> rfl
+
+/-- The synthesized guard is `.top` exactly when the target simplifies to `.top`. -/
+private theorem isTop_synthesizeGuardIR (a b : GuardIR) :
+    GuardIR.isTop (synthesizeGuardIR a b) = GuardIR.isTop (GuardIR.simplifyUnder a b) := by
+  unfold synthesizeGuardIR
+  cases GuardIR.simplifyUnder a b <;>
+    first
+      | rfl
+      | (cases GuardIR.residual .top (GuardIR.nf a) <;> rfl)
+
+/-- The optimizer's entailment test is exactly triviality of the synthesized guard. -/
+private theorem GuardIR.entails_eq (ctx g : GuardIR) :
+    GuardIR.entails ctx g = GuardIR.isTop (synthesizeGuardIR ctx g) :=
+  (isTop_synthesizeGuardIR ctx g).symm
+
+private theorem evalGuard_simplifyUnder {env : Env} {ctx : GuardIR}
+    (hctx : evalGuard env ctx = true) (g : GuardIR) :
+    evalGuard env (GuardIR.simplifyUnder ctx g) = evalGuard env g := by
+  unfold GuardIR.simplifyUnder
+  rw [GuardIR.evalGuard_residual (by rw [GuardIR.evalGuard_nf]; exact hctx), GuardIR.evalGuard_nf]
+
+/-- Pointwise Boolean semantics of the synthesized guard: `a → b`. -/
+private theorem evalGuard_synthesizeGuardIR (env : Env) (a b : GuardIR) :
+    evalGuard env (synthesizeGuardIR a b) = (!evalGuard env a || evalGuard env b) := by
+  have hb : evalGuard env a = true →
+      evalGuard env (GuardIR.simplifyUnder a b) = evalGuard env b :=
+    fun ha => evalGuard_simplifyUnder ha b
+  have ha : evalGuard env (GuardIR.residual .top (GuardIR.nf a)) = evalGuard env a := by
+    rw [GuardIR.evalGuard_residual rfl, GuardIR.evalGuard_nf]
+  unfold synthesizeGuardIR
+  generalize GuardIR.simplifyUnder a b = r at hb ⊢
+  cases r with
+  | top =>
+    cases hA : evalGuard env a with
+    | false => rfl
+    | true => exact hb hA
+  | _ =>
+    simp only [GuardIR.evalGuard_wrapImp, ha]
+    cases hA : evalGuard env a with
+    | false => rfl
+    | true => exact hb hA
+
+/-- A `.nonZero` target that is a hypothesis of the (normalised) context is discharged. -/
+private theorem synthesizeGuardIR_eq_top_of_hasHyp {a : GuardIR} {p : PureExpr}
+    (h : GuardIR.hasHyp (GuardIR.nf a) (.nonZero p) = true) :
+    synthesizeGuardIR a (.nonZero p) = .top := by
+  unfold synthesizeGuardIR GuardIR.simplifyUnder
+  simp only [GuardIR.nf, GuardIR.residual, h, ↓reduceIte]
+
+/-- Categorical Realization of `synthesizeGuardIR`: Denotation commutes with abstract `synthesizeGuard`. -/
+theorem synthesizeGuardIR_denote (a b : GuardIR) :
+    denoteGuard (synthesizeGuardIR a b) = synthesizeGuard (denoteGuard a) (denoteGuard b) := by
+  funext env
+  apply propext
+  show evalGuard env (synthesizeGuardIR a b) = true ↔
+    (evalGuard env a = true → evalGuard env b = true)
+  rw [evalGuard_synthesizeGuardIR]
+  cases evalGuard env a <;> cases evalGuard env b <;> decide
+
+/-- Universal Property (Heyting Adjunction) of `synthesizeGuardIR` in `Env → Prop`. -/
+theorem synthesizeGuardIR_universal (a b : GuardIR) (g : Env → Prop) :
+    denoteGuard a ⊓ g ≤ denoteGuard b ↔ g ≤ denoteGuard (synthesizeGuardIR a b) := by
+  rw [synthesizeGuardIR_denote]
+  exact synthesizeGuard_adjunction (denoteGuard a) (denoteGuard b) g
+
+/-- Syntactic Self-Discharge: Synthesizing a non-zero guard already present in context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_self (p : PureExpr) :
+    synthesizeGuardIR (.nonZero p) (.nonZero p) = .top := by
+  apply synthesizeGuardIR_eq_top_of_hasHyp
+  simp only [GuardIR.nf, GuardIR.hasHyp, decide_true]
+
+/-! ### Operational soundness of the expression optimizer -/
+
+private theorem bindOutcome2_congr {f : Int → Int → Outcome} {o₁ o₁' o₂ o₂' : Outcome}
+    (h₁ : o₁' = o₁) (h₂ : ∀ n, o₁ = .val n → o₂' = o₂) :
+    bindOutcome2 f o₁' o₂' = bindOutcome2 f o₁ o₂ := by
+  subst h₁
+  cases o₁' with
+  | val n => rw [h₂ n rfl]
+  | trap => rfl
+  | ub => rfl
+
+/-- Euclidean cancellation `(x * d) / d = x = (d * x) / d` for a non-zero divisor. -/
+private theorem PureExpr.cancelFactor?_eval {env : Env} {num d x : PureExpr}
+    (h : PureExpr.cancelFactor? num d = some x) (hd : evalPure env d ≠ 0) :
+    evalPure env num / evalPure env d = evalPure env x := by
+  unfold PureExpr.cancelFactor? at h
+  split at h
+  · split at h
+    · next hb =>
+      cases h
+      subst hb
+      exact Int.mul_ediv_cancel _ hd
+    · split at h
+      · next ha =>
+        cases h
+        subst ha
+        exact Int.mul_ediv_cancel_left _ hd
+      · cases h
+  · cases h
+
+private theorem Expr.evalExpr_of_asPure {env : Env} {e : Expr} {p : PureExpr}
+    (h : Expr.asPure? e = some p) : evalExpr env e = .val (evalPure env p) := by
+  induction e generalizing p with
+  | pure q =>
+    cases h
+    rfl
+  | add e₁ e₂ ih₁ ih₂ | sub e₁ e₂ ih₁ ih₂ | mul e₁ e₂ ih₁ ih₂ =>
+    simp only [Expr.asPure?] at h
+    cases h₁ : Expr.asPure? e₁ with
+    | none => simp only [h₁] at h; cases h
+    | some p₁ =>
+      cases h₂ : Expr.asPure? e₂ with
+      | none => simp only [h₁, h₂] at h; cases h
+      | some p₂ =>
+        simp only [h₁, h₂] at h
+        cases h
+        simp only [evalExpr, ih₁ h₁, ih₂ h₂, evalPure]
+  | _ => cases h
+
+/-- The facts recorded by `Expr.postFacts` hold whenever the expression evaluates to a value. -/
+private theorem Expr.evalGuard_postFacts {env : Env} {e : Expr} {v : Int}
+    (h : evalExpr env e = .val v) : evalGuard env (Expr.postFacts e) = true := by
+  induction e generalizing v with
+  | pure p => rfl
+  | add e₁ e₂ ih₁ ih₂ | sub e₁ e₂ ih₁ ih₂ | mul e₁ e₂ ih₁ ih₂ =>
+    simp only [evalExpr] at h
+    cases h₁ : evalExpr env e₁ with
+    | val a =>
+      cases h₂ : evalExpr env e₂ with
+      | val b => simp only [Expr.postFacts, evalGuard, ih₁ h₁, ih₂ h₂, Bool.and_self]
+      | trap => simp only [h₁, h₂] at h; cases h
+      | ub => simp only [h₁, h₂] at h; cases h
+    | trap => simp only [h₁] at h; cases h
+    | ub => simp only [h₁] at h; cases h
+  | checkedDiv n d ihn ihd | uncheckedDiv n d ihn ihd =>
+    simp only [evalExpr] at h
+    cases h₁ : evalExpr env n with
+    | val a =>
+      cases h₂ : evalExpr env d with
+      | val b =>
+        simp only [h₁, h₂] at h
+        have hb : b ≠ 0 := by
+          intro hb
+          simp only [hb, ↓reduceIte] at h
+          cases h
+        simp only [Expr.postFacts, evalGuard, ihn h₁, ihd h₂, Bool.and_self, Bool.true_and]
+        cases hp : Expr.asPure? d with
+        | none => rfl
+        | some pd =>
+          have hv := Expr.evalExpr_of_asPure (env := env) hp
+          rw [h₂] at hv
+          cases hv
+          exact decide_eq_true hb
+      | trap => simp only [h₁, h₂] at h; cases h
+      | ub => simp only [h₁, h₂] at h; cases h
+    | trap => simp only [h₁] at h; cases h
+    | ub => simp only [h₁] at h; cases h
+  | iteGuard g t f _ _ => rfl
+
+private theorem Expr.evalExpr_mkBin {env : Env} {pop : PureExpr → PureExpr → PureExpr}
+    {eop : Expr → Expr → Expr}
+    (hop : ∀ p₁ p₂, evalExpr env (eop (.pure p₁) (.pure p₂)) = .val (evalPure env (pop p₁ p₂)))
+    (e₁ e₂ : Expr) :
+    evalExpr env (Expr.mkBin pop eop e₁ e₂) = evalExpr env (eop e₁ e₂) := by
+  unfold Expr.mkBin
+  split
+  · exact (hop _ _).symm
+  · rfl
+
+private theorem Expr.evalExpr_mkSafeDiv {env : Env} {n : Expr} {pd : PureExpr}
+    (hd : ∀ a, evalExpr env n = .val a → evalPure env pd ≠ 0) :
+    evalExpr env (Expr.mkSafeDiv n pd) = evalExpr env (.uncheckedDiv n (.pure pd)) := by
+  unfold Expr.mkSafeDiv
+  split
+  · next pn =>
+    have hd' := hd _ rfl
+    split
+    · next x hx =>
+      simp only [evalExpr, ite_eq_right hd', PureExpr.cancelFactor?_eval hx hd']
+    · rfl
+  · rfl
+
+private theorem Expr.evalExpr_rawDiv_congr {env : Env} (checked : Bool) {n n' d d' : Expr}
+    (hn : evalExpr env n' = evalExpr env n)
+    (hd : ∀ a, evalExpr env n = .val a → evalExpr env d' = evalExpr env d) :
+    evalExpr env (Expr.rawDiv checked n' d') = evalExpr env (Expr.rawDiv checked n d) := by
+  cases checked with
+  | true =>
+    exact bindOutcome2_congr (f := fun x y => if y = 0 then .trap else .val (x / y)) hn hd
+  | false =>
+    exact bindOutcome2_congr (f := fun x y => if y = 0 then .ub else .val (x / y)) hn hd
+
+private theorem Expr.evalExpr_uncheckedDiv_eq_rawDiv {env : Env} (checked : Bool) {n : Expr}
+    {pd : PureExpr} (hnz : ∀ a, evalExpr env n = .val a → evalPure env pd ≠ 0) :
+    evalExpr env (.uncheckedDiv n (.pure pd)) =
+      evalExpr env (Expr.rawDiv checked n (.pure pd)) := by
+  cases checked with
+  | false => rfl
+  | true =>
+    simp only [Expr.rawDiv, evalExpr]
+    cases h : evalExpr env n with
+    | val a => simp only [ite_eq_right (hnz a h)]
+    | trap => rfl
+    | ub => rfl
+
+/-- Soundness of the optimizer's non-zero query, obtained from the universal property
+    (Heyting adjunction) of `synthesizeGuardIR`: a trivial residual guard means that the
+    context already forces the divisor to be non-zero. -/
+private theorem evalPure_ne_zero_of_entails {env : Env} {K : GuardIR} {pd : PureExpr}
+    (h : GuardIR.entails K (.nonZero pd) = true)
+    (hK : evalGuard env K = true) : evalPure env pd ≠ 0 := by
+  have htop : synthesizeGuardIR K (.nonZero pd) = .top :=
+    GuardIR.isTop_iff.mp (GuardIR.entails_eq K (.nonZero pd) ▸ h)
+  have hle : denoteGuard K ⊓ denoteGuard K ≤ denoteGuard (.nonZero pd) :=
+    (synthesizeGuardIR_universal K (.nonZero pd) (denoteGuard K)).mpr
+      (by rw [htop]; intro _ _; rfl)
+  exact of_decide_eq_true (hle env (And.intro hK hK))
+
+private theorem Expr.evalExpr_mkDiv {env : Env} (checked : Bool) {K : GuardIR}
+    {n n' d d' : Expr}
+    (hn : evalExpr env n' = evalExpr env n)
+    (hd : ∀ a, evalExpr env n = .val a → evalExpr env d' = evalExpr env d)
+    (hK : ∀ a b, evalExpr env n = .val a → evalExpr env d = .val b → evalGuard env K = true) :
+    evalExpr env (Expr.mkDiv checked K n' d') = evalExpr env (Expr.rawDiv checked n d) := by
+  have hraw : evalExpr env (Expr.rawDiv checked n' d') =
+      evalExpr env (Expr.rawDiv checked n d) := Expr.evalExpr_rawDiv_congr checked hn hd
+  unfold Expr.mkDiv
+  split
+  · next pd =>
+    split
+    · next hk =>
+      have hnz : ∀ a, evalExpr env n' = .val a → evalPure env pd ≠ 0 := by
+        intro a ha
+        rw [hn] at ha
+        exact evalPure_ne_zero_of_entails hk (hK a _ ha (hd a ha).symm)
+      rw [← hraw, Expr.evalExpr_mkSafeDiv hnz]
+      exact Expr.evalExpr_uncheckedDiv_eq_rawDiv checked hnz
+    · exact hraw
+  · exact hraw
+
+private theorem Expr.evalExpr_mkIte {env : Env} {sf : Bool} {g r : GuardIR}
+    {t t' f f' : Expr}
+    (hsf : sf = true → evalGuard env g = false)
+    (hr : evalGuard env r = evalGuard env g)
+    (ht : evalGuard env g = true → evalExpr env t' = evalExpr env t)
+    (hf : evalGuard env g = false → evalExpr env f' = evalExpr env f) :
+    evalExpr env (Expr.mkIte sf r t' f') = evalExpr env (.iteGuard g t f) := by
+  have key : evalExpr env (.iteGuard r t' f') = evalExpr env (.iteGuard g t f) := by
+    simp only [evalExpr, hr]
+    cases hg : evalGuard env g with
+    | true => simp only [↓reduceIte]; exact ht hg
+    | false => simp only [Bool.false_eq_true, ↓reduceIte]; exact hf hg
+  unfold Expr.mkIte
+  split
+  · have hg := hsf rfl
+    rw [hf hg]
+    simp only [evalExpr, hg, Bool.false_eq_true, ↓reduceIte]
+  · have hg : evalGuard env g = true := by rw [← hr]; rfl
+    rw [ht hg]
+    simp only [evalExpr, hg, ↓reduceIte]
+  · exact key
+
+/-- Operational soundness of `optimizeExpr`, by structural induction on the expression. -/
+private theorem optimizeExpr_sound_aux (e : Expr) :
+    ∀ (ctx : GuardIR) (env : Env), evalGuard env ctx = true →
+      evalExpr env (optimizeExpr ctx e) = evalExpr env e := by
+  induction e with
+  | pure p => intro ctx env _; rfl
+  | add e₁ e₂ ih₁ ih₂ =>
+    intro ctx env hctx
+    rw [optimizeExpr, Expr.evalExpr_mkBin (fun _ _ => rfl)]
+    exact bindOutcome2_congr (f := fun x y => .val (x + y)) (ih₁ ctx env hctx)
+      (fun a ha => ih₂ _ env (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha)))
+  | sub e₁ e₂ ih₁ ih₂ =>
+    intro ctx env hctx
+    rw [optimizeExpr, Expr.evalExpr_mkBin (fun _ _ => rfl)]
+    exact bindOutcome2_congr (f := fun x y => .val (x - y)) (ih₁ ctx env hctx)
+      (fun a ha => ih₂ _ env (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha)))
+  | mul e₁ e₂ ih₁ ih₂ =>
+    intro ctx env hctx
+    rw [optimizeExpr, Expr.evalExpr_mkBin (fun _ _ => rfl)]
+    exact bindOutcome2_congr (f := fun x y => .val (x * y)) (ih₁ ctx env hctx)
+      (fun a ha => ih₂ _ env (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha)))
+  | checkedDiv n d ihn ihd =>
+    intro ctx env hctx
+    rw [optimizeExpr]
+    exact Expr.evalExpr_mkDiv true (ihn ctx env hctx)
+      (fun a ha => ihd _ env (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha)))
+      (fun a b ha hb => GuardIR.evalGuard_conj_intro
+        (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha))
+        (Expr.evalGuard_postFacts hb))
+  | uncheckedDiv n d ihn ihd =>
+    intro ctx env hctx
+    rw [optimizeExpr]
+    exact Expr.evalExpr_mkDiv false (ihn ctx env hctx)
+      (fun a ha => ihd _ env (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha)))
+      (fun a b ha hb => GuardIR.evalGuard_conj_intro
+        (GuardIR.evalGuard_conj_intro hctx (Expr.evalGuard_postFacts ha))
+        (Expr.evalGuard_postFacts hb))
+  | iteGuard g t f iht ihf =>
+    intro ctx env hctx
+    rw [optimizeExpr]
+    refine Expr.evalExpr_mkIte ?_ (evalGuard_simplifyUnder hctx g) ?_ ?_
+    · intro hsf
+      rw [← GuardIR.evalGuard_nf, GuardIR.isBot_iff.mp hsf]
+      rfl
+    · intro hg
+      exact iht _ env (GuardIR.evalGuard_conj_intro hctx hg)
+    · intro hg
+      refine ihf _ env (GuardIR.evalGuard_conj_intro hctx ?_)
+      simp only [evalGuard, hg, Bool.not_false, Bool.true_or]
+
+/-- Stage-Guarded Soundness of `optimizeExpr` via `GuardedEquiv` and `liftEval`. -/
+theorem optimizeExpr_guardedEquiv (ctx : GuardIR) (e : Expr) :
+    GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (optimizeExpr ctx e) e := by
+  exact (liftEval_guardedEquiv_iff evalExpr (denoteGuard ctx) (optimizeExpr ctx e) e).mpr
+    (fun env h => optimizeExpr_sound_aux e ctx env h)
+
+/-- Concrete Operational Soundness of `optimizeExpr`: Whenever `evalGuard env ctx = true`,
+    the optimized expression evaluates to the exact same `Outcome` as the original expression. -/
+theorem optimizeExpr_sound (ctx : GuardIR) (e : Expr) (env : Env) :
+    evalGuard env ctx = true → evalExpr env (optimizeExpr ctx e) = evalExpr env e := by
+  exact optimizeExpr_sound_aux e ctx env
+
+/-! ### Static counts and runtime check cost -/
+
+private theorem Expr.count_mkBin {cnt : Expr → Nat} {pop : PureExpr → PureExpr → PureExpr}
+    {eop : Expr → Expr → Expr} (hpure : ∀ p, cnt (.pure p) = 0)
+    (hop : ∀ a b, cnt (eop a b) = cnt a + cnt b) (e₁ e₂ : Expr) :
+    cnt (Expr.mkBin pop eop e₁ e₂) = cnt e₁ + cnt e₂ := by
+  unfold Expr.mkBin
+  split
+  · simp only [hpure]
+  · exact hop _ _
+
+private theorem Expr.count_mkSafeDiv {cnt : Expr → Nat} (hpure : ∀ p, cnt (.pure p) = 0)
+    (hdiv : ∀ a b, cnt (.uncheckedDiv a b) = cnt a + cnt b) (n : Expr) (pd : PureExpr) :
+    cnt (Expr.mkSafeDiv n pd) = cnt n := by
+  unfold Expr.mkSafeDiv
+  split
+  · split
+    · simp only [hpure]
+    · simp only [hdiv, hpure]
+  · simp only [hdiv, hpure, Nat.add_zero]
+
+/-- An expression without checked divisions or guard branches performs no runtime checks. -/
+private theorem execCheckCost_eq_zero {env : Env} {e : Expr}
+    (h₁ : checkedDivCount e = 0) (h₂ : guardBranchCount e = 0) : execCheckCost env e = 0 := by
+  induction e with
+  | pure p => rfl
+  | add e₁ e₂ ih₁ ih₂ | sub e₁ e₂ ih₁ ih₂ | mul e₁ e₂ ih₁ ih₂ | uncheckedDiv e₁ e₂ ih₁ ih₂ =>
+    simp only [checkedDivCount, Nat.add_eq_zero_iff] at h₁
+    simp only [guardBranchCount, Nat.add_eq_zero_iff] at h₂
+    simp only [execCheckCost, ih₁ h₁.1 h₂.1, ih₂ h₁.2 h₂.2]
+    cases evalExpr env e₁ <;> rfl
+  | checkedDiv e₁ e₂ _ _ =>
+    simp only [checkedDivCount] at h₁
+    omega
+  | iteGuard g t f _ _ =>
+    simp only [guardBranchCount] at h₂
+    omega
+
+private theorem execCheckCost_checkedDiv_add_pure (env : Env) (x d y : PureExpr) :
+    execCheckCost env (.add (.checkedDiv (.pure x) (.pure d)) (.pure y)) = 1 := by
+  simp only [execCheckCost, evalExpr, ↓reduceIte]
+  cases (if evalPure env d = 0 then Outcome.trap
+    else Outcome.val (evalPure env x / evalPure env d)) <;> rfl
+
+private theorem execCheckCost_mkDualDivExpr {env : Env} (x y : PureExpr) {d : PureExpr}
+    (h : evalPure env d ≠ 0) : execCheckCost env (mkDualDivExpr x y d) = 2 := by
+  simp only [mkDualDivExpr, execCheckCost, evalExpr, ite_eq_right h, ↓reduceIte]
+
+private theorem evalExpr_mkDualDivExpr_trap {env : Env} (x y : PureExpr) {d : PureExpr}
+    (h : evalPure env d = 0) : evalExpr env (mkDualDivExpr x y d) = .trap := by
+  simp only [mkDualDivExpr, evalExpr, h, ↓reduceIte]
+
+/-- Known-Context Check Elimination: Under context `v₀ ≠ 0`, `optimizeExpr` eliminates all
+    checked divisions, introduces zero runtime guard branches, and incurs zero runtime check cost. -/
+theorem optimizeExpr_known_ctx_elim (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+      guardBranchCount (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+      execCheckCost env (optimizeExpr (.nonZero (.var 0)) m1BenchExpr) = 0 := by
+  have hopt : optimizeExpr (.nonZero (.var 0)) m1BenchExpr =
+      .add (.uncheckedDiv (.pure (.var 1)) (.pure (.var 0))) (.pure (.var 2)) := by decide
+  rw [hopt]
+  exact ⟨rfl, rfl, execCheckCost_eq_zero rfl rfl⟩
+
+/-- Guarded Algebraic Cancellation: Under context `v₀ ≠ 0`, `(v₁ * v₀) / v₀` eliminates division completely. -/
+theorem optimizeExpr_cancel_div :
+    divOpCount (optimizeExpr (.nonZero (.var 0)) m1CancelExpr) = 0 := by
+  decide
+
+/-- Unknown-Context Guard Deduplication: Under trivial context `.top`, `optimizeExpr` reduces
+    runtime check cost on `m1BenchExpr` from `2` down to at most `1` whenever `v₀ ≠ 0`. -/
+theorem optimizeExpr_unknown_ctx_dedup (env : Env) (h : env 0 ≠ 0) :
+    execCheckCost env (optimizeExpr .top m1BenchExpr) ≤ 1 ∧
+      execCheckCost env m1BenchExpr = 2 := by
+  have hopt : optimizeExpr .top m1BenchExpr =
+      .add (.checkedDiv (.pure (.var 1)) (.pure (.var 0))) (.pure (.var 2)) := by decide
+  rw [hopt, execCheckCost_checkedDiv_add_pure]
+  exact ⟨Nat.le_refl 1, execCheckCost_mkDualDivExpr (.var 1) (.var 2) (d := .var 0) h⟩
+
+/-- Trap Preservation (Negative Safety Test): Under trivial context `.top`, when `v₀ = 0`,
+    `optimizeExpr .top m1BenchExpr` still safely traps rather than triggering `.ub` or fabricating a value. -/
+theorem optimizeExpr_zero_div_trap (env : Env) (h : env 0 = 0) :
+    evalExpr env (optimizeExpr .top m1BenchExpr) = .trap := by
+  rw [optimizeExpr_sound .top m1BenchExpr env rfl]
+  exact evalExpr_mkDualDivExpr_trap (.var 1) (.var 2) (d := .var 0) h
+
+/-- Right-Top Residual Normalization: Synthesizing `.top` from any context `a` yields `.top`. -/
+theorem synthesizeGuardIR_top_right (a : GuardIR) :
+    synthesizeGuardIR a .top = .top := by
+  rfl
+
+/-- Left-Bottom Residual Normalization: Synthesizing any target `b` from inconsistent context `.bot` yields `.top`. -/
+theorem synthesizeGuardIR_bot_left (b : GuardIR) :
+    synthesizeGuardIR .bot b = .top := by
+  unfold synthesizeGuardIR GuardIR.simplifyUnder
+  rw [show GuardIR.nf .bot = .bot from rfl, GuardIR.residual_of_hasHyp_bot (c := .bot) rfl]
+
+/-- Top-Antecedent Atomic Normalization: Synthesizing `.nonZero p` from trivial context `.top`
+    returns `.nonZero p` directly rather than an unsimplified `.imp .top (.nonZero p)` wrapper. -/
+theorem synthesizeGuardIR_top_left_nonZero (p : PureExpr) :
+    synthesizeGuardIR .top (.nonZero p) = .nonZero p := by
+  rfl
+
+/-- Left Conjunctive Context Discharge: Synthesizing `.nonZero p` when `.nonZero p` appears on the
+    left of a conjunctive context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_conj_left (p : PureExpr) (rest : GuardIR) :
+    synthesizeGuardIR (.conj (.nonZero p) rest) (.nonZero p) = .top := by
+  apply synthesizeGuardIR_eq_top_of_hasHyp
+  simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp, decide_true, Bool.true_or]
+
+/-- Right Conjunctive Context Discharge: Synthesizing `.nonZero p` when `.nonZero p` appears on the
+    right of a conjunctive context yields `.top`. -/
+theorem synthesizeGuardIR_discharge_conj_right (rest : GuardIR) (p : PureExpr) :
+    synthesizeGuardIR (.conj rest (.nonZero p)) (.nonZero p) = .top := by
+  apply synthesizeGuardIR_eq_top_of_hasHyp
+  simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp, decide_true, Bool.or_true]
+
+/-- Duplicate Conjunctive Target Normalization: Synthesizing `.conj (.nonZero p) (.nonZero p)` from
+    `.top` deduplicates the residual guard to `.nonZero p`. -/
+theorem synthesizeGuardIR_dedup_conj (p : PureExpr) :
+    synthesizeGuardIR .top (.conj (.nonZero p) (.nonZero p)) = .nonZero p := by
+  simp only [synthesizeGuardIR, GuardIR.simplifyUnder, GuardIR.nf, GuardIR.mkConj,
+    GuardIR.residual, GuardIR.hasHyp, GuardIR.wrapImp, decide_true, Bool.false_or,
+    Bool.false_eq_true, ↓reduceIte]
+
+/-! ### Symbolic evaluation of the optimizer on the parametric shapes -/
+
+/-- For a `.nonZero` target the optimizer's query is plain hypothesis lookup. -/
+private theorem GuardIR.entails_nonZero (K : GuardIR) (pd : PureExpr) :
+    GuardIR.entails K (.nonZero pd) = GuardIR.hasHyp (GuardIR.nf K) (.nonZero pd) := by
+  show GuardIR.isTop
+    (if GuardIR.hasHyp (GuardIR.nf K) (.nonZero pd) = true then GuardIR.top
+     else .nonZero pd) = _
+  cases GuardIR.hasHyp (GuardIR.nf K) (.nonZero pd) <;> rfl
+
+private theorem Expr.mkBin_pure_pure (pop : PureExpr → PureExpr → PureExpr)
+    (eop : Expr → Expr → Expr) (p q : PureExpr) :
+    Expr.mkBin pop eop (.pure p) (.pure q) = .pure (pop p q) := rfl
+
+private theorem Expr.mkSafeDiv_pure_mul_right (x d : PureExpr) :
+    Expr.mkSafeDiv (.pure (.mul x d)) d = .pure x := by
+  simp only [Expr.mkSafeDiv, PureExpr.cancelFactor?, ↓reduceIte]
+
+private theorem Expr.mkSafeDiv_pure_mul_left (x d : PureExpr) :
+    ∃ z, Expr.mkSafeDiv (.pure (.mul d x)) d = .pure z :=
+  if h : x = d then
+    ⟨d, by simp only [Expr.mkSafeDiv, PureExpr.cancelFactor?, h, ↓reduceIte]⟩
+  else
+    ⟨x, by simp only [Expr.mkSafeDiv, PureExpr.cancelFactor?, h, ↓reduceIte]⟩
+
+/-- A checked division by a pure divisor whose non-zeroness is a hypothesis of the context
+    is lowered by `Expr.mkSafeDiv`. -/
+private theorem optimizeExpr_checkedDiv_pure_of_hasHyp {ctx : GuardIR} (num d : PureExpr)
+    (h : GuardIR.hasHyp (GuardIR.nf ctx) (.nonZero d) = true) :
+    optimizeExpr ctx (.checkedDiv (.pure num) (.pure d)) = Expr.mkSafeDiv (.pure num) d := by
+  simp only [optimizeExpr, Expr.postFacts, Expr.mkDiv, GuardIR.entails_nonZero,
+    GuardIR.nf, GuardIR.mkConj_top_right, h, ↓reduceIte]
+
+private theorem optimizeExpr_top_mkDualDivExpr (x y d : PureExpr) :
+    optimizeExpr .top (mkDualDivExpr x y d) =
+      .add (.checkedDiv (.pure x) (.pure d)) (.pure y) := by
+  simp only [mkDualDivExpr, optimizeExpr, Expr.postFacts, Expr.asPure?, Expr.mkBin, Expr.mkDiv,
+    GuardIR.entails_nonZero, GuardIR.nf, GuardIR.mkConj, GuardIR.hasHyp,
+    Expr.mkSafeDiv_pure_mul_right, Expr.rawDiv, decide_true, Bool.false_eq_true, ↓reduceIte]
+
+private theorem optimizeExpr_nonZero_mkDualDivExpr (x y d : PureExpr) :
+    optimizeExpr (.nonZero d) (mkDualDivExpr x y d) =
+      Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y) := by
+  simp only [mkDualDivExpr, optimizeExpr, Expr.postFacts, Expr.asPure?, Expr.mkBin_pure_pure,
+    Expr.mkDiv, GuardIR.entails_nonZero, GuardIR.nf, GuardIR.mkConj, GuardIR.hasHyp,
+    Expr.mkSafeDiv_pure_mul_right, decide_true, Bool.or_true, ↓reduceIte]
+
+/-- Parametric Checked-Division Elimination: For arbitrary pure operands `num, d` and extra context `extra`,
+    `optimizeExpr` eliminates `.checkedDiv (.pure num) (.pure d)` under `.nonZero d` and conjunctive
+    contexts containing `.nonZero d` with zero guard branches and zero runtime check cost. -/
+theorem optimizeExpr_elim_checkedDiv_param (num d : PureExpr) (extra : GuardIR) (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero d) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      checkedDivCount (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      checkedDivCount (optimizeExpr (.conj extra (.nonZero d)) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      guardBranchCount (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+      execCheckCost env (optimizeExpr (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 := by
+  have h₁ : GuardIR.hasHyp (GuardIR.nf (.nonZero d)) (.nonZero d) = true := by
+    simp only [GuardIR.nf, GuardIR.hasHyp, decide_true]
+  have h₂ : GuardIR.hasHyp (GuardIR.nf (.conj (.nonZero d) extra)) (.nonZero d) = true := by
+    simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp, decide_true, Bool.true_or]
+  have h₃ : GuardIR.hasHyp (GuardIR.nf (.conj extra (.nonZero d))) (.nonZero d) = true := by
+    simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp, decide_true, Bool.or_true]
+  have hc : checkedDivCount (Expr.mkSafeDiv (.pure num) d) = 0 :=
+    Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl) _ _
+  have hg : guardBranchCount (Expr.mkSafeDiv (.pure num) d) = 0 :=
+    Expr.count_mkSafeDiv (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl) _ _
+  rw [optimizeExpr_checkedDiv_pure_of_hasHyp num d h₁,
+    optimizeExpr_checkedDiv_pure_of_hasHyp num d h₂,
+    optimizeExpr_checkedDiv_pure_of_hasHyp num d h₃]
+  exact ⟨hc, hc, hc, hg, execCheckCost_eq_zero hc hg⟩
+
+/-- Parametric Guarded Algebraic Cancellation: Under `.nonZero d`, both `(x * d) / d` and `(d * x) / d`
+    eliminate division completely for arbitrary `PureExpr` operands `x, d`. -/
+theorem optimizeExpr_cancel_div_param (x d : PureExpr) :
+    divOpCount (optimizeExpr (.nonZero d) (mkCancelExpr x d)) = 0 ∧
+      divOpCount (optimizeExpr (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d))) = 0 := by
+  have h₁ : optimizeExpr (.nonZero d) (mkCancelExpr x d) = .pure x := by
+    simp only [mkCancelExpr, optimizeExpr, Expr.postFacts, Expr.mkBin_pure_pure, Expr.mkDiv,
+      GuardIR.entails_nonZero, GuardIR.nf, GuardIR.mkConj, GuardIR.hasHyp,
+      Expr.mkSafeDiv_pure_mul_right, decide_true, ↓reduceIte]
+  have h₂ : optimizeExpr (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d)) =
+      Expr.mkSafeDiv (.pure (.mul d x)) d := by
+    simp only [optimizeExpr, Expr.postFacts, Expr.mkBin_pure_pure, Expr.mkDiv,
+      GuardIR.entails_nonZero, GuardIR.nf, GuardIR.mkConj, GuardIR.hasHyp,
+      decide_true, ↓reduceIte]
+  obtain ⟨z, hz⟩ := Expr.mkSafeDiv_pure_mul_left x d
+  rw [h₁, h₂, hz]
+  exact ⟨rfl, rfl⟩
+
+/-! ### Monotonicity of the optimizer in its context
+
+`optimizeExpr` optimizes the right operand of a binary node under a context strengthened by
+the facts established by the left operand. Compositionality therefore needs the following
+property: a stronger context never leaves more checked divisions behind. -/
+
+private theorem Expr.mkBin_eq_pure {pop : PureExpr → PureExpr → PureExpr}
+    {eop : Expr → Expr → Expr} (hop : ∀ a b p, eop a b ≠ .pure p) {e₁ e₂ : Expr}
+    {p : PureExpr} (h : Expr.mkBin pop eop e₁ e₂ = .pure p) :
+    ∃ p₁ p₂, e₁ = .pure p₁ ∧ e₂ = .pure p₂ := by
+  unfold Expr.mkBin at h
+  split at h
+  · exact ⟨_, _, rfl, rfl⟩
+  · exact absurd h (hop _ _ _)
+
+private theorem Expr.mkSafeDiv_eq_pure {n : Expr} {pd p : PureExpr}
+    (h : Expr.mkSafeDiv n pd = .pure p) : ∃ pn, n = .pure pn := by
+  unfold Expr.mkSafeDiv at h
+  split at h
+  · exact ⟨_, rfl⟩
+  · cases h
+
+private theorem Expr.rawDiv_ne_pure (checked : Bool) (n d : Expr) (p : PureExpr) :
+    Expr.rawDiv checked n d ≠ .pure p := by
+  cases checked <;> exact fun h => Expr.noConfusion h
+
+private theorem Expr.cdc_rawDiv_mono (checked : Bool) {n n' d d' : Expr}
+    (hn : checkedDivCount n' ≤ checkedDivCount n) (hd : checkedDivCount d' ≤ checkedDivCount d) :
+    checkedDivCount (Expr.rawDiv checked n' d') ≤ checkedDivCount (Expr.rawDiv checked n d) := by
+  cases checked with
+  | true => exact Nat.add_le_add (Nat.add_le_add_left hn 1) hd
+  | false => exact Nat.add_le_add hn hd
+
+private theorem Expr.mkDiv_pure_known {checked : Bool} {K : GuardIR} {n : Expr} {pd : PureExpr}
+    (hk : GuardIR.entails K (.nonZero pd) = true) :
+    Expr.mkDiv checked K n (.pure pd) = Expr.mkSafeDiv n pd := by
+  simp only [Expr.mkDiv, hk, ↓reduceIte]
+
+private theorem Expr.mkDiv_pure_unknown {checked : Bool} {K : GuardIR} {n : Expr}
+    {pd : PureExpr} (hk : GuardIR.entails K (.nonZero pd) = false) :
+    Expr.mkDiv checked K n (.pure pd) = Expr.rawDiv checked n (.pure pd) := by
+  simp only [Expr.mkDiv, hk, Bool.false_eq_true, ↓reduceIte]
+
+private theorem Expr.mkDiv_not_pure {checked : Bool} {K : GuardIR} {n d : Expr}
+    (hd : ∀ pd, d ≠ .pure pd) : Expr.mkDiv checked K n d = Expr.rawDiv checked n d := by
+  unfold Expr.mkDiv
+  split
+  · next pd => exact absurd rfl (hd pd)
+  · rfl
+
+private theorem Expr.pure_or_not (d : Expr) : (∃ pd, d = .pure pd) ∨ ∀ pd, d ≠ .pure pd := by
+  cases d with
+  | pure pd => exact Or.inl ⟨pd, rfl⟩
+  | _ => exact Or.inr (fun _ h => Expr.noConfusion h)
+
+private theorem Expr.cdc_mkDiv_le (checked : Bool) (K : GuardIR) (n d : Expr) :
+    checkedDivCount (Expr.mkDiv checked K n d) ≤ checkedDivCount (Expr.rawDiv checked n d) := by
+  rcases Expr.pure_or_not d with ⟨pd, rfl⟩ | hnp
+  · cases hk : GuardIR.entails K (.nonZero pd) with
+    | true =>
+      rw [Expr.mkDiv_pure_known hk,
+        Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl)]
+      cases checked with
+      | true => exact Nat.le_trans (Nat.le_add_left _ 1) (Nat.le_add_right _ _)
+      | false => exact Nat.le_add_right _ _
+    | false => exact Nat.le_of_eq (congrArg checkedDivCount (Expr.mkDiv_pure_unknown hk))
+  · exact Nat.le_of_eq (congrArg checkedDivCount (Expr.mkDiv_not_pure hnp))
+
+/-- `CtxLe c c'`: every hypothesis available in the context `c` is available in `c'`. -/
+private def GuardIR.CtxLe (c c' : GuardIR) : Prop :=
+  ∀ h, GuardIR.hasHyp (GuardIR.nf c) h = true → GuardIR.hasHyp (GuardIR.nf c') h = true
+
+private theorem GuardIR.CtxLe.conj {c c' : GuardIR} (hle : GuardIR.CtxLe c c') (F : GuardIR) :
+    GuardIR.CtxLe (.conj c F) (.conj c' F) := by
+  intro h
+  simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, Bool.or_eq_true]
+  exact Or.imp_left (hle h)
+
+private theorem GuardIR.CtxLe.conj_right (c F : GuardIR) : GuardIR.CtxLe c (.conj c F) := by
+  intro h hh
+  simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, Bool.or_eq_true]
+  exact Or.inl hh
+
+private theorem GuardIR.CtxLe.simplifyUnder_top {c c' : GuardIR} (hle : GuardIR.CtxLe c c')
+    {g : GuardIR} (h : GuardIR.simplifyUnder c g = .top) : GuardIR.simplifyUnder c' g = .top :=
+  GuardIR.residual_top_mono hle _ h
+
+private theorem GuardIR.CtxLe.entails_mono {c c' : GuardIR} (hle : GuardIR.CtxLe c c')
+    {g : GuardIR} (h : GuardIR.entails c g = true) : GuardIR.entails c' g = true :=
+  GuardIR.isTop_iff.mpr (hle.simplifyUnder_top (GuardIR.isTop_iff.mp h))
+
+/-- Refinement between two optimizer outputs: no more checked divisions, and a pure result
+    stays the same pure result. -/
+private def Expr.Refines (e' e : Expr) : Prop :=
+  checkedDivCount e' ≤ checkedDivCount e ∧ ∀ p, e = .pure p → e' = .pure p
+
+private theorem Expr.mkBin_refines {pop : PureExpr → PureExpr → PureExpr}
+    {eop : Expr → Expr → Expr}
+    (hcnt : ∀ a b, checkedDivCount (eop a b) = checkedDivCount a + checkedDivCount b)
+    (hnp : ∀ a b p, eop a b ≠ .pure p) {a a' b b' : Expr}
+    (ha : Expr.Refines a' a) (hb : Expr.Refines b' b) :
+    Expr.Refines (Expr.mkBin pop eop a' b') (Expr.mkBin pop eop a b) := by
+  refine ⟨?_, ?_⟩
+  · rw [Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) hcnt,
+      Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) hcnt]
+    exact Nat.add_le_add ha.1 hb.1
+  · intro p h
+    obtain ⟨p₁, p₂, rfl, rfl⟩ := Expr.mkBin_eq_pure hnp h
+    rw [ha.2 p₁ rfl, hb.2 p₂ rfl]
+    exact h
+
+private theorem Expr.mkDiv_refines (checked : Bool) {K K' : GuardIR}
+    (hK : GuardIR.CtxLe K K') {n n' d d' : Expr}
+    (hn : Expr.Refines n' n) (hd : Expr.Refines d' d) :
+    Expr.Refines (Expr.mkDiv checked K' n' d') (Expr.mkDiv checked K n d) := by
+  have hraw : checkedDivCount (Expr.mkDiv checked K' n' d') ≤
+      checkedDivCount (Expr.rawDiv checked n d) :=
+    Nat.le_trans (Expr.cdc_mkDiv_le checked K' n' d') (Expr.cdc_rawDiv_mono checked hn.1 hd.1)
+  rcases Expr.pure_or_not d with ⟨pd, rfl⟩ | hnp
+  · cases hk : GuardIR.entails K (.nonZero pd) with
+    | true =>
+      rw [hd.2 pd rfl, Expr.mkDiv_pure_known hk, Expr.mkDiv_pure_known (hK.entails_mono hk)]
+      refine ⟨?_, ?_⟩
+      · rw [Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl),
+          Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl)]
+        exact hn.1
+      · intro p hp
+        obtain ⟨pn, rfl⟩ := Expr.mkSafeDiv_eq_pure hp
+        rw [hn.2 pn rfl]
+        exact hp
+    | false =>
+      rw [Expr.mkDiv_pure_unknown hk]
+      exact ⟨hraw, fun p hp => absurd hp (Expr.rawDiv_ne_pure _ _ _ _)⟩
+  · rw [Expr.mkDiv_not_pure hnp]
+    exact ⟨hraw, fun p hp => absurd hp (Expr.rawDiv_ne_pure _ _ _ _)⟩
+
+private theorem Expr.mkIte_refines (sf : Bool) {r r' : GuardIR} (hr : r = .top → r' = .top)
+    {t t' f f' : Expr} (ht : Expr.Refines t' t) (hf : Expr.Refines f' f) :
+    Expr.Refines (Expr.mkIte sf r' t' f') (Expr.mkIte sf r t f) := by
+  cases sf with
+  | true => exact hf
+  | false =>
+    cases r with
+    | top => rw [hr rfl]; exact ht
+    | _ =>
+      refine ⟨?_, fun p hp => Expr.noConfusion hp⟩
+      cases r' with
+      | top => exact Nat.le_trans ht.1 (Nat.le_add_right _ _)
+      | _ => exact Nat.add_le_add ht.1 hf.1
+
+/-- A stronger context never leaves more checked divisions behind. -/
+private theorem optimizeExpr_refines (e : Expr) :
+    ∀ c c' : GuardIR, GuardIR.CtxLe c c' →
+      Expr.Refines (optimizeExpr c' e) (optimizeExpr c e) := by
+  induction e with
+  | pure p => intro c c' _; exact ⟨Nat.le_refl _, fun _ h => h⟩
+  | add e₁ e₂ ih₁ ih₂ =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkBin_refines (fun _ _ => rfl) (fun _ _ _ h => Expr.noConfusion h)
+      (ih₁ c c' hle) (ih₂ _ _ (hle.conj _))
+  | sub e₁ e₂ ih₁ ih₂ =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkBin_refines (fun _ _ => rfl) (fun _ _ _ h => Expr.noConfusion h)
+      (ih₁ c c' hle) (ih₂ _ _ (hle.conj _))
+  | mul e₁ e₂ ih₁ ih₂ =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkBin_refines (fun _ _ => rfl) (fun _ _ _ h => Expr.noConfusion h)
+      (ih₁ c c' hle) (ih₂ _ _ (hle.conj _))
+  | checkedDiv n d ihn ihd =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkDiv_refines true ((hle.conj _).conj _) (ihn c c' hle) (ihd _ _ (hle.conj _))
+  | uncheckedDiv n d ihn ihd =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkDiv_refines false ((hle.conj _).conj _) (ihn c c' hle) (ihd _ _ (hle.conj _))
+  | iteGuard g t f iht ihf =>
+    intro c c' hle
+    rw [optimizeExpr, optimizeExpr]
+    exact Expr.mkIte_refines _ hle.simplifyUnder_top (iht _ _ (hle.conj _)) (ihf _ _ (hle.conj _))
+
+/-- Binary Context Compositionality: If `optimizeExpr (.nonZero d)` eliminates all checked divisions
+    and introduces no guard branches on `e₁` and `e₂`, then it also eliminates all checked divisions on
+    `.add e₁ e₂`, `.sub e₁ e₂`, and `.mul e₁ e₂`. -/
+theorem optimizeExpr_compositional_binary (d : PureExpr) (e₁ e₂ : Expr)
+    (h₁ : checkedDivCount (optimizeExpr (.nonZero d) e₁) = 0 ∧
+          guardBranchCount (optimizeExpr (.nonZero d) e₁) = 0)
+    (h₂ : checkedDivCount (optimizeExpr (.nonZero d) e₂) = 0 ∧
+          guardBranchCount (optimizeExpr (.nonZero d) e₂) = 0) :
+    checkedDivCount (optimizeExpr (.nonZero d) (.add e₁ e₂)) = 0 ∧
+      checkedDivCount (optimizeExpr (.nonZero d) (.sub e₁ e₂)) = 0 ∧
+      checkedDivCount (optimizeExpr (.nonZero d) (.mul e₁ e₂)) = 0 := by
+  have hmono : checkedDivCount
+      (optimizeExpr (.conj (.nonZero d) (Expr.postFacts e₁)) e₂) = 0 :=
+    Nat.eq_zero_of_le_zero
+      (h₂.1 ▸ (optimizeExpr_refines e₂ _ _ (GuardIR.CtxLe.conj_right _ _)).1)
+  refine ⟨?_, ?_, ?_⟩ <;>
+    rw [optimizeExpr,
+      Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl), h₁.1, hmono]
+
+/-- Parametric Known-Context Elimination: Under `.nonZero d`, `optimizeExpr` on `mkDualDivExpr x y d`
+    eliminates all checked divisions, introduces zero guard branches, and incurs zero runtime check cost. -/
+theorem optimizeExpr_known_ctx_elim_param (x y d : PureExpr) (env : Env) :
+    checkedDivCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+      guardBranchCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+      execCheckCost env (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 := by
+  have hc : checkedDivCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 := by
+    rw [optimizeExpr_nonZero_mkDualDivExpr,
+      Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+  have hg : guardBranchCount (optimizeExpr (.nonZero d) (mkDualDivExpr x y d)) = 0 := by
+    rw [optimizeExpr_nonZero_mkDualDivExpr,
+      Expr.count_mkBin (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+  exact ⟨hc, hg, execCheckCost_eq_zero hc hg⟩
+
+/-- Parametric Unknown-Context Guard Deduplication: Under `.top`, for any `x, y, d` and `env` with
+    `evalPure env d ≠ 0`, `optimizeExpr` reduces runtime check cost on `mkDualDivExpr x y d` from `2` to `≤ 1`. -/
+theorem optimizeExpr_unknown_ctx_dedup_param (x y d : PureExpr) (env : Env)
+    (h : evalPure env d ≠ 0) :
+    execCheckCost env (optimizeExpr .top (mkDualDivExpr x y d)) ≤ 1 ∧
+      execCheckCost env (mkDualDivExpr x y d) = 2 := by
+  rw [optimizeExpr_top_mkDualDivExpr, execCheckCost_checkedDiv_add_pure]
+  exact ⟨Nat.le_refl 1, execCheckCost_mkDualDivExpr x y h⟩
+
+/-- Parametric Trap Preservation: Under `.top`, for any `x, y, d` and `env` with `evalPure env d = 0`,
+    `optimizeExpr .top (mkDualDivExpr x y d)` safely traps. -/
+theorem optimizeExpr_zero_div_trap_param (x y d : PureExpr) (env : Env)
+    (h : evalPure env d = 0) :
+    evalExpr env (optimizeExpr .top (mkDualDivExpr x y d)) = .trap := by
+  rw [optimizeExpr_sound .top (mkDualDivExpr x y d) env rfl]
+  exact evalExpr_mkDualDivExpr_trap x y h
+
 end CatSem

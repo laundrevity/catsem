@@ -1,5 +1,7 @@
 import Specs.Target
 import Mathlib.Order.BooleanAlgebra.Basic
+import Lean.Elab.Command
+import Lean.Util.CollectAxioms
 
 /-!
 # Guard-synthesis specification audit
@@ -10,7 +12,7 @@ implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All forty-two declarations in `Specs.Target` currently have placeholder proofs. None
+The proof and compiler stubs in `Specs.Target` currently contain placeholders. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -2299,4 +2301,799 @@ theorem bad_step_trace :
 
 end Round11
 
+
+/-!
+## Milestone 1: Round 1 Gate 1 audit (historical contract)
+
+Review artifact: reviews/M1-prelock.md. The original Round 1 obligations are constructively
+satisfiable, but they permit the fixture-specific optimizer below. This is an
+adversarial existence witness, not a proposed implementation of the compiler.
+The exact benchmark/context combinations improve, while a renamed benchmark
+remains unchanged. All compiler-dependent obligations are packaged together
+in CompilerObligations; the three independent TCB bridge/compatibility
+obligations are also proved here.
+
+The tests reject a global identity pass, always-false synthesis, always-imp
+synthesis, a false-guard fallback, in-context trap-to-UB changes, and dropping
+a strict failing operand. They retain the original zero-divisor trap under
+the unknown context, and exhibit real positive reductions at a satisfying
+environment. Dynamic cost witnesses refer to the abstract IR observer;
+the separate runtime traversal caveat is documented in the review.
+No declaration here invokes a target compiler stub or target theorem.
+-/
+
+namespace M1
+
+def nz : GuardIR := .nonZero (.var 0)
+def fastBench : Expr :=
+  .add (.uncheckedDiv (.pure (.var 1)) (.pure (.var 0))) (.pure (.var 2))
+def guardedBench : Expr := .iteGuard nz fastBench m1BenchExpr
+
+theorem fast_sound (env : Env) (h : env 0 ≠ 0) :
+    evalExpr env fastBench = evalExpr env m1BenchExpr := by
+  simp [fastBench, m1BenchExpr, evalExpr, evalPure, h, Int.mul_ediv_cancel]
+theorem cancel_sound (env : Env) (h : env 0 ≠ 0) :
+    evalExpr env (.pure (.var 1)) = evalExpr env m1CancelExpr := by
+  simp [m1CancelExpr, evalExpr, evalPure, h, Int.mul_ediv_cancel]
+theorem guarded_sound (env : Env) :
+    evalExpr env guardedBench = evalExpr env m1BenchExpr := by
+  by_cases h : env 0 = 0
+  · simp [guardedBench, nz, m1BenchExpr, evalExpr, evalGuard, evalPure, h]
+  · simp [guardedBench, nz, fastBench, m1BenchExpr, evalExpr, evalGuard, evalPure,
+      h, Int.mul_ediv_cancel]
+/-- A deliberately fixture-specific optimizer: every other expression is returned unchanged. -/
+def opt (ctx : GuardIR) (e : Expr) : Expr :=
+  if ctx = nz then
+    if e = m1BenchExpr then fastBench
+    else if e = m1CancelExpr then .pure (.var 1)
+    else e
+  else if ctx = .top ∧ e = m1BenchExpr then guardedBench else e
+theorem opt_sound (ctx : GuardIR) (e : Expr) (env : Env)
+    (hctx : evalGuard env ctx = true) :
+    evalExpr env (opt ctx e) = evalExpr env e := by
+  by_cases hc : ctx = nz
+  · subst ctx
+    have hn : env 0 ≠ 0 := by
+      change decide (env 0 ≠ 0) = true at hctx
+      exact of_decide_eq_true hctx
+    by_cases hb : e = m1BenchExpr
+    · subst e
+      simpa [opt] using fast_sound env hn
+    · by_cases hx : e = m1CancelExpr
+      · subst e
+        simpa [opt, hb] using cancel_sound env hn
+      · simp [opt, hb, hx]
+  · by_cases ht : ctx = .top ∧ e = m1BenchExpr
+    · rcases ht with ⟨rfl, rfl⟩
+      simpa [opt, nz] using guarded_sound env
+    · simp [opt, hc, ht]
+
+/-- Correct synthesis with only syntactic-equality discharge; other residuals remain implications. -/
+def synth (a b : GuardIR) : GuardIR := if a = b then .top else .imp a b
+theorem synth_eval (a b : GuardIR) (env : Env) :
+    evalGuard env (synth a b) = ((!evalGuard env a) || evalGuard env b) := by
+  unfold synth
+  split
+  · rename_i h
+    subst b
+    cases evalGuard env a <;> rfl
+  · rfl
+theorem synth_denote (a b : GuardIR) :
+    denoteGuard (synth a b) = synthesizeGuard (denoteGuard a) (denoteGuard b) := by
+  funext env
+  apply propext
+  change evalGuard env (synth a b) = true ↔ (evalGuard env a = true → evalGuard env b = true)
+  rw [synth_eval]
+  cases evalGuard env a <;> cases evalGuard env b <;> decide
+theorem synth_universal (a b : GuardIR) (g : Env → Prop) :
+    denoteGuard a ⊓ g ≤ denoteGuard b ↔ g ≤ denoteGuard (synth a b) := by
+  rw [synth_denote]
+  exact le_himp_iff'.symm
+theorem synth_discharge (p : PureExpr) : synth (.nonZero p) (.nonZero p) = .top := by
+  simp [synth]
+
+theorem known_elim (env : Env) :
+    checkedDivCount (opt nz m1BenchExpr) = 0 ∧
+    guardBranchCount (opt nz m1BenchExpr) = 0 ∧ execCheckCost env (opt nz m1BenchExpr) = 0 := by
+  by_cases h : env 0 = 0 <;>
+    simp [opt, fastBench, checkedDivCount, guardBranchCount, execCheckCost, evalExpr, evalPure, h]
+theorem cancel_elim : divOpCount (opt nz m1CancelExpr) = 0 := by
+  decide
+theorem unknown_dedup (env : Env) (h : env 0 ≠ 0) :
+    execCheckCost env (opt .top m1BenchExpr) ≤ 1 ∧ execCheckCost env m1BenchExpr = 2 := by
+  simp [opt, nz, guardedBench, fastBench, m1BenchExpr, execCheckCost, guardEvalCost,
+    evalGuard, evalExpr, evalPure, h]
+theorem zero_trap (env : Env) (h : env 0 = 0) :
+    evalExpr env (opt .top m1BenchExpr) = .trap := by
+  simp [opt, nz, guardedBench, m1BenchExpr, evalGuard, evalExpr, evalPure, h]
+
+theorem lift_bridge {S Term Out : Type*} (run : S → Term → Out)
+    (P : S → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (liftEval run) P t₁ t₂ ↔ ∀ s, P s → run s t₁ = run s t₂ := by
+  constructor
+  · intro h s hs
+    have he := h P le_rfl
+    have hout : liftEval run P t₂ s (run s t₁) :=
+      Eq.mp (congrFun (congrFun he s) (run s t₁)) ⟨hs, rfl⟩
+    exact hout.2.symm
+  · intro h Q hQP
+    funext s out
+    apply propext
+    constructor
+    · rintro ⟨hs, he⟩
+      exact ⟨hs, (h s (hQP s hs)).symm.trans he⟩
+    · rintro ⟨hs, he⟩
+      exact ⟨hs, (h s (hQP s hs)).trans he⟩
+
+theorem lift_binary_compatible {Term : Type*} (run : Env → Term → Outcome)
+    (op : Term → Term → Term) (f : Int → Int → Outcome)
+    (hop : ∀ env l r, run env (op l r) = bindOutcome2 f (run env l) (run env r)) :
+    CompatibleOp2 (liftEval run) op (liftBinarySem f) := by
+  intro P l r
+  funext env out
+  apply propext
+  constructor
+  · rintro ⟨hp, he⟩
+    exact ⟨run env l, run env r, ⟨hp, rfl⟩, ⟨hp, rfl⟩, (hop env l r).symm.trans he⟩
+  · rintro ⟨o₁, o₂, ⟨hp, h₁⟩, ⟨_, h₂⟩, he⟩
+    refine ⟨hp, ?_⟩
+    rw [hop, h₁, h₂]
+    exact he
+
+theorem addition_compatible :
+    CompatibleOp2 (liftEval evalExpr) Expr.add (liftBinarySem (fun x y => .val (x + y))) := by
+  exact lift_binary_compatible evalExpr Expr.add _ (fun _ _ _ => rfl)
+theorem checked_division_compatible :
+    CompatibleOp2 (liftEval evalExpr) Expr.checkedDiv
+      (liftBinarySem (fun x y => if y = 0 then .trap else .val (x / y))) := by
+  exact lift_binary_compatible evalExpr Expr.checkedDiv _ (fun _ _ _ => rfl)
+
+theorem opt_guarded (ctx : GuardIR) (e : Expr) :
+    GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (opt ctx e) e := by
+  exact (lift_bridge evalExpr (denoteGuard ctx) (opt ctx e) e).mpr (opt_sound ctx e)
+
+/-- The same benchmark shape with renamed variables, outside the candidate's exact fixtures. -/
+def renamedBench : Expr :=
+  .add
+    (.checkedDiv (.pure (.var 2)) (.pure (.var 3)))
+    (.checkedDiv (.mul (.pure (.var 4)) (.pure (.var 3))) (.pure (.var 3)))
+theorem renamed_untouched :
+    opt (.nonZero (.var 3)) renamedBench = renamedBench := by
+  decide
+theorem renamed_still_checks :
+    checkedDivCount (opt (.nonZero (.var 3)) renamedBench) = 2 := by
+  decide
+
+
+theorem unsimplified_top_residual (p : PureExpr) :
+    synth .top (.nonZero p) = .imp .top (.nonZero p) := by
+  rfl
+
+/-- The nine original Round 1 compiler obligations, before the parametric revision.
+The bridge and the two compatibility obligations are proved independently above. -/
+structure CompilerObligations
+    (synthFn : GuardIR → GuardIR → GuardIR) (optFn : GuardIR → Expr → Expr) : Prop where
+  guardDenote : ∀ a b, denoteGuard (synthFn a b) = synthesizeGuard (denoteGuard a) (denoteGuard b)
+  universal : ∀ a b (g : Env → Prop),
+    denoteGuard a ⊓ g ≤ denoteGuard b ↔ g ≤ denoteGuard (synthFn a b)
+  selfDischarge : ∀ p, synthFn (.nonZero p) (.nonZero p) = .top
+  guarded : ∀ ctx e, GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (optFn ctx e) e
+  sound : ∀ ctx e env, evalGuard env ctx = true → evalExpr env (optFn ctx e) = evalExpr env e
+  known : ∀ env, checkedDivCount (optFn (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+    guardBranchCount (optFn (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+    execCheckCost env (optFn (.nonZero (.var 0)) m1BenchExpr) = 0
+  cancel : divOpCount (optFn (.nonZero (.var 0)) m1CancelExpr) = 0
+  dedup : ∀ env, env 0 ≠ 0 →
+    execCheckCost env (optFn .top m1BenchExpr) ≤ 1 ∧ execCheckCost env m1BenchExpr = 2
+  trap : ∀ env, env 0 = 0 → evalExpr env (optFn .top m1BenchExpr) = .trap
+
+theorem candidate_obligations : CompilerObligations synth opt where
+  guardDenote := synth_denote
+  universal := synth_universal
+  selfDischarge := synth_discharge
+  guarded := opt_guarded
+  sound := opt_sound
+  known := known_elim
+  cancel := cancel_elim
+  dedup := unknown_dedup
+  trap := zero_trap
+
+theorem compiler_obligations_satisfiable :
+    ∃ (synthFn : GuardIR → GuardIR → GuardIR) (optFn : GuardIR → Expr → Expr),
+      CompilerObligations synthFn optFn := by
+  exact ⟨synth, opt, candidate_obligations⟩
+
+def positiveEnv : Env := fun v => if v = 0 then 2 else if v = 1 then 7 else 3
+def zeroEnv : Env := fun _ => 0
+
+theorem positive_reduction_witness :
+    evalGuard positiveEnv nz = true ∧
+    evalExpr positiveEnv m1BenchExpr = .val 6 ∧
+    evalExpr positiveEnv (opt nz m1BenchExpr) = .val 6 ∧
+    evalExpr positiveEnv (opt .top m1BenchExpr) = .val 6 ∧
+    execCheckCost positiveEnv m1BenchExpr = 2 ∧
+    execCheckCost positiveEnv (opt nz m1BenchExpr) = 0 ∧
+    execCheckCost positiveEnv (opt .top m1BenchExpr) = 1 := by
+  decide
+
+theorem zero_trap_witness :
+    evalGuard zeroEnv nz = false ∧
+    evalExpr zeroEnv m1BenchExpr = .trap ∧
+    evalExpr zeroEnv (opt .top m1BenchExpr) = .trap ∧
+    execCheckCost zeroEnv m1BenchExpr = 1 ∧
+    execCheckCost zeroEnv (opt .top m1BenchExpr) = 2 := by
+  decide
+
+/-- Undefined behavior outside a false optimization context is not ruled out by contextual soundness. -/
+theorem outside_context_ub :
+    evalGuard zeroEnv nz = false ∧ evalExpr zeroEnv (opt nz m1BenchExpr) = .ub := by
+  decide
+
+theorem identity_rejected (synthFn : GuardIR → GuardIR → GuardIR) :
+    ¬ CompilerObligations synthFn (fun _ e => e) := by
+  intro h
+  have bad := (h.known zeroEnv).1
+  change (2 : ℕ) = 0 at bad
+  cases bad
+
+theorem constant_bot_rejected (optFn : GuardIR → Expr → Expr) :
+    ¬ CompilerObligations (fun _ _ => .bot) optFn := by
+  intro h
+  have he := congrFun (h.guardDenote .top .top) zeroEnv
+  have hb : denoteGuard .bot zeroEnv := Eq.mpr he (fun _ => rfl)
+  change false = true at hb
+  cases hb
+
+theorem raw_imp_rejected (optFn : GuardIR → Expr → Expr) :
+    ¬ CompilerObligations GuardIR.imp optFn := by
+  intro h
+  have bad := h.selfDischarge (.var 0)
+  cases bad
+
+theorem false_fallback_still_checks :
+    checkedDivCount (.iteGuard .bot fastBench m1BenchExpr) = 2 ∧
+    guardBranchCount (.iteGuard .bot fastBench m1BenchExpr) = 1 ∧
+    execCheckCost positiveEnv (.iteGuard .bot fastBench m1BenchExpr) = 2 := by
+  decide
+
+def trapExpr : Expr := .checkedDiv (.pure (.lit 1)) (.pure (.lit 0))
+def ubExpr : Expr := .uncheckedDiv (.pure (.lit 1)) (.pure (.lit 0))
+def zeroExpr : Expr := .pure (.lit 0)
+
+theorem strict_outcomes :
+    evalExpr zeroEnv (.mul zeroExpr trapExpr) = .trap ∧
+    evalExpr zeroEnv (.mul zeroExpr ubExpr) = .ub ∧
+    evalExpr zeroEnv (.add trapExpr ubExpr) = .trap ∧
+    evalExpr zeroEnv (.add ubExpr trapExpr) = .ub ∧
+    evalExpr zeroEnv (.iteGuard .bot ubExpr (.pure (.lit 7))) = .val 7 := by
+  decide
+
+theorem short_circuit_costs :
+    execCheckCost zeroEnv (.add trapExpr trapExpr) = 1 ∧
+    execCheckCost zeroEnv (.add ubExpr trapExpr) = 0 ∧
+    execCheckCost zeroEnv (.checkedDiv (.pure (.lit 1)) trapExpr) = 1 ∧
+    execCheckCost zeroEnv (.iteGuard .bot ubExpr (.pure (.lit 7))) = 0 := by
+  decide
+
+theorem guard_short_circuit :
+    evalGuard zeroEnv (.imp nz .bot) = true ∧
+    evalGuard positiveEnv (.imp nz .bot) = false ∧
+    guardEvalCost positiveEnv (.conj .bot nz) = 0 ∧
+    guardEvalCost positiveEnv (.imp .bot nz) = 0 ∧
+    guardEvalCost positiveEnv (.imp .top nz) = 1 ∧
+    guardEvalCost positiveEnv (.conj nz (.eq (.var 1) (.var 2))) = 2 ∧
+    guardEvalCost zeroEnv (.conj nz (.eq (.var 1) (.var 2))) = 1 := by
+  decide
+
+theorem trap_to_ub_rejected :
+    ¬ GuardedEquiv (liftEval evalExpr) (denoteGuard .top) trapExpr ubExpr := by
+  intro h
+  have bad := (lift_bridge evalExpr (denoteGuard .top) trapExpr ubExpr).mp h zeroEnv rfl
+  cases bad
+
+theorem dropping_strict_operand_rejected :
+    ¬ GuardedEquiv (liftEval evalExpr) (denoteGuard .top) (.mul zeroExpr trapExpr) zeroExpr := by
+  intro h
+  have bad := (lift_bridge evalExpr (denoteGuard .top) (.mul zeroExpr trapExpr) zeroExpr).mp h zeroEnv rfl
+  cases bad
+
+theorem integer_division_scope :
+    evalExpr zeroEnv (.checkedDiv (.pure (.lit (-3))) (.pure (.lit 2))) = .val (-2) := by
+  decide
+
+end M1
+
+
+/-!
+## Milestone 1: Round 2 pre-lock re-review
+
+The original fixture-only M1.opt is preserved above as a historical witness.
+The strengthened parametric contract below rejects it independently of the
+guard synthesizer. The new synthesizer normalizes the required residual forms,
+and the optimizer recursively rewrites arbitrary expression subtrees under
+known nonzero contexts. Its top-context rule recognizes a shared-divisor
+shape over arbitrary PureExpr operands, not fixed benchmark names/variables.
+UpdatedObligations packages every original and new compiler-dependent law;
+the independent lifting/compatibility obligations remain proved in M1.
+
+The candidate is total and computable, with direct semantic and capability
+proofs. The renamed/compound/nested examples have satisfying contexts and
+real outcome/check reductions. No target compiler or theorem stub is invoked.
+The source's final command audits all named RedTeam declarations and the
+imported Defs module transitively, fails on forbidden dependencies, and emits
+the records consumed by scripts/check_axioms.py.
+-/
+
+namespace M1R2
+
+def hasNZ (ctx : GuardIR) (p : PureExpr) : Bool :=
+  match ctx with
+  | .nonZero q => decide (q = p)
+  | .conj l r => hasNZ l p || hasNZ r p
+  | _ => false
+
+theorem hasNZ_sound (ctx : GuardIR) (p : PureExpr) (env : Env) :
+    hasNZ ctx p = true → evalGuard env ctx = true → evalPure env p ≠ 0 := by
+  induction ctx with
+  | top => simp [hasNZ]
+  | bot => simp [hasNZ]
+  | eq l r => simp [hasNZ]
+  | imp l r _ _ => simp [hasNZ]
+  | nonZero q =>
+    intro h hc
+    have heq : q = p := of_decide_eq_true h
+    subst q
+    exact of_decide_eq_true hc
+  | conj l r ihl ihr =>
+    intro h hc
+    simp only [hasNZ, Bool.or_eq_true] at h
+    simp only [evalGuard, Bool.and_eq_true] at hc
+    rcases h with hl | hr
+    · exact ihl hl hc.1
+    · exact ihr hr hc.2
+
+@[simp] theorem hasNZ_self (p : PureExpr) : hasNZ (.nonZero p) p = true := by
+  simp [hasNZ]
+@[simp] theorem hasNZ_left (p : PureExpr) (rest : GuardIR) :
+    hasNZ (.conj (.nonZero p) rest) p = true := by
+  simp [hasNZ]
+@[simp] theorem hasNZ_right (rest : GuardIR) (p : PureExpr) :
+    hasNZ (.conj rest (.nonZero p)) p = true := by
+  simp [hasNZ]
+def shrink (b : GuardIR) : GuardIR :=
+  match b with
+  | .conj l r => if l = r then l else .conj l r
+  | _ => b
+
+theorem shrink_eval (b : GuardIR) (env : Env) : evalGuard env (shrink b) = evalGuard env b := by
+  cases b <;> try rfl
+  rename_i l r
+  by_cases h : l = r
+  · subst r
+    simp [shrink, evalGuard]
+  · simp [shrink, h]
+
+def synthNZ (a : GuardIR) (p : PureExpr) : GuardIR :=
+  if hasNZ a p then .top else .imp a (.nonZero p)
+
+theorem synthNZ_eval (a : GuardIR) (p : PureExpr) (env : Env) :
+    evalGuard env (synthNZ a p) = ((!evalGuard env a) || evalGuard env (.nonZero p)) := by
+  unfold synthNZ
+  split
+  · rename_i h
+    cases ha : evalGuard env a with
+    | false => rfl
+    | true =>
+      have hp := hasNZ_sound a p env h ha
+      simp [evalGuard, hp]
+  · rfl
+
+def synth (a b : GuardIR) : GuardIR :=
+  match a, b with
+  | .bot, _ => .top
+  | _, .top => .top
+  | .top, _ => shrink b
+  | _, .nonZero p => synthNZ a p
+  | _, _ => .imp a b
+
+theorem synth_eval (a b : GuardIR) (env : Env) :
+    evalGuard env (synth a b) = ((!evalGuard env a) || evalGuard env b) := by
+  cases a <;> cases b <;> simp [synth, shrink_eval, synthNZ_eval, evalGuard]
+
+theorem synth_denote (a b : GuardIR) :
+    denoteGuard (synth a b) = synthesizeGuard (denoteGuard a) (denoteGuard b) := by
+  funext env
+  apply propext
+  change evalGuard env (synth a b) = true ↔ (evalGuard env a = true → evalGuard env b = true)
+  rw [synth_eval]
+  cases evalGuard env a <;> cases evalGuard env b <;> decide
+
+theorem synth_universal (a b : GuardIR) (g : Env → Prop) :
+    denoteGuard a ⊓ g ≤ denoteGuard b ↔ g ≤ denoteGuard (synth a b) := by
+  rw [synth_denote]
+  exact le_himp_iff'.symm
+
+theorem synth_self (p : PureExpr) : synth (.nonZero p) (.nonZero p) = .top := by
+  simp [synth, synthNZ]
+theorem synth_top_right (a : GuardIR) : synth a .top = .top := by
+  cases a <;> rfl
+theorem synth_bot_left (b : GuardIR) : synth .bot b = .top := by
+  rfl
+theorem synth_top_left_nonZero (p : PureExpr) : synth .top (.nonZero p) = .nonZero p := by
+  rfl
+theorem synth_conj_left (p : PureExpr) (rest : GuardIR) :
+    synth (.conj (.nonZero p) rest) (.nonZero p) = .top := by
+  simp [synth, synthNZ]
+theorem synth_conj_right (rest : GuardIR) (p : PureExpr) :
+    synth (.conj rest (.nonZero p)) (.nonZero p) = .top := by
+  simp [synth, synthNZ]
+theorem synth_dedup (p : PureExpr) :
+    synth .top (.conj (.nonZero p) (.nonZero p)) = .nonZero p := by
+  simp [synth, shrink]
+/-- Simplify checked division with a pure denominator known nonzero in context. -/
+def smartDiv (ctx : GuardIR) (num div : Expr) : Expr :=
+  match num, div with
+  | .mul (.pure x) (.pure y), .pure d =>
+    if hasNZ ctx d then
+      if y = d then .pure x
+      else if x = d then .pure y
+      else .uncheckedDiv num div
+    else .checkedDiv num div
+  | _, .pure d => if hasNZ ctx d then .uncheckedDiv num div else .checkedDiv num div
+  | _, _ => .checkedDiv num div
+
+theorem smartDiv_sound (ctx : GuardIR) (num div : Expr) (env : Env)
+    (hc : evalGuard env ctx = true) :
+    evalExpr env (smartDiv ctx num div) = evalExpr env (.checkedDiv num div) := by
+  unfold smartDiv
+  split
+  · rename_i x y d
+    split
+    · rename_i hn
+      have hd := hasNZ_sound ctx d env hn hc
+      split
+      · rename_i hy
+        subst y
+        simp [evalExpr, hd, Int.mul_ediv_cancel]
+      · split
+        · rename_i hx
+          subst x
+          simp [evalExpr, hd, Int.mul_comm, Int.mul_ediv_cancel]
+        · simp [evalExpr, hd]
+    · rfl
+  · rename_i num' div' d hnum
+    split
+    · rename_i hn
+      have hd := hasNZ_sound ctx d env hn hc
+      simp [evalExpr, hd]
+    · rfl
+  · rfl
+
+
+/-- Recursive optimizer for arbitrary expression subtrees under a known context. -/
+def core (ctx : GuardIR) : Expr → Expr
+  | .pure p => .pure p
+  | .add l r => .add (core ctx l) (core ctx r)
+  | .sub l r => .sub (core ctx l) (core ctx r)
+  | .mul l r => .mul (core ctx l) (core ctx r)
+  | .checkedDiv l r => smartDiv ctx (core ctx l) (core ctx r)
+  | .uncheckedDiv l r => .uncheckedDiv (core ctx l) (core ctx r)
+  | .iteGuard g t f => .iteGuard g (core ctx t) (core ctx f)
+
+theorem core_sound (ctx : GuardIR) (e : Expr) (env : Env)
+    (hc : evalGuard env ctx = true) : evalExpr env (core ctx e) = evalExpr env e := by
+  induction e with
+  | pure p => rfl
+  | add l r ihl ihr => simp only [core, evalExpr, ihl, ihr]
+  | sub l r ihl ihr => simp only [core, evalExpr, ihl, ihr]
+  | mul l r ihl ihr => simp only [core, evalExpr, ihl, ihr]
+  | uncheckedDiv l r ihl ihr => simp only [core, evalExpr, ihl, ihr]
+  | checkedDiv l r ihl ihr =>
+    simp only [core]
+    rw [smartDiv_sound ctx _ _ env hc]
+    simp only [evalExpr, ihl, ihr]
+  | iteGuard g t f iht ihf => simp only [core, evalExpr, iht, ihf]
+
+theorem smartDiv_top (num div : Expr) :
+    smartDiv .top num div = .checkedDiv num div := by
+  unfold smartDiv
+  split <;> simp [hasNZ]
+
+theorem core_top (e : Expr) : core .top e = e := by
+  induction e with
+  | pure p => rfl
+  | add l r ihl ihr => simp [core, ihl, ihr]
+  | sub l r ihl ihr => simp [core, ihl, ihr]
+  | mul l r ihl ihr => simp [core, ihl, ihr]
+  | checkedDiv l r ihl ihr => simp [core, ihl, ihr, smartDiv_top]
+  | uncheckedDiv l r ihl ihr => simp [core, ihl, ihr]
+  | iteGuard g t f iht ihf => simp [core, iht, ihf]
+
+
+def fastDual (x y d : PureExpr) : Expr :=
+  .add (.uncheckedDiv (.pure x) (.pure d)) (.pure y)
+def guardedDual (x y d : PureExpr) : Expr :=
+  .iteGuard (.nonZero d) (fastDual x y d) (mkDualDivExpr x y d)
+
+theorem fastDual_sound (x y d : PureExpr) (env : Env) (hd : evalPure env d ≠ 0) :
+    evalExpr env (fastDual x y d) = evalExpr env (mkDualDivExpr x y d) := by
+  simp [fastDual, mkDualDivExpr, evalExpr, hd, Int.mul_ediv_cancel]
+theorem guardedDual_sound (x y d : PureExpr) (env : Env) :
+    evalExpr env (guardedDual x y d) = evalExpr env (mkDualDivExpr x y d) := by
+  by_cases hd : evalPure env d = 0
+  · simp [guardedDual, evalExpr, evalGuard, hd]
+  · simp [guardedDual, evalExpr, evalGuard, hd, fastDual_sound x y d env hd]
+
+/-- Share one residual check across arbitrary pure operands with the same divisor. -/
+def topPass (e : Expr) : Expr :=
+  match e with
+  | .add (.checkedDiv (.pure x) (.pure d₁))
+      (.checkedDiv (.mul (.pure y) (.pure d₂)) (.pure d₃)) =>
+      if d₁ = d₂ ∧ d₂ = d₃ then guardedDual x y d₁ else e
+  | _ => e
+
+theorem topPass_sound (e : Expr) (env : Env) :
+    evalExpr env (topPass e) = evalExpr env e := by
+  unfold topPass
+  split
+  · rename_i x d₁ y d₂ d₃
+    split
+    · rename_i hd
+      rcases hd with ⟨h₁₂, h₂₃⟩
+      subst d₂
+      subst d₃
+      exact guardedDual_sound x y d₁ env
+    · rfl
+  · rfl
+
+/-- Total computable optimizer; rules contain no fixed variable identifiers or benchmark constants. -/
+def opt (ctx : GuardIR) (e : Expr) : Expr :=
+  if ctx = .top then topPass e else core ctx e
+
+theorem opt_sound (ctx : GuardIR) (e : Expr) (env : Env)
+    (hc : evalGuard env ctx = true) : evalExpr env (opt ctx e) = evalExpr env e := by
+  unfold opt
+  split
+  · exact topPass_sound e env
+  · exact core_sound ctx e env hc
+
+theorem opt_top_dual (x y d : PureExpr) :
+    opt .top (mkDualDivExpr x y d) = guardedDual x y d := by
+  simp [opt, topPass, mkDualDivExpr]
+
+
+theorem core_pure_div (ctx : GuardIR) (num d : PureExpr) (hn : hasNZ ctx d = true) :
+    core ctx (.checkedDiv (.pure num) (.pure d)) = .uncheckedDiv (.pure num) (.pure d) := by
+  simp [core, smartDiv, hn]
+
+theorem core_cancel_right (ctx : GuardIR) (x d : PureExpr) (hn : hasNZ ctx d = true) :
+    core ctx (mkCancelExpr x d) = .pure x := by
+  simp [core, smartDiv, mkCancelExpr, hn]
+
+theorem opt_known_dual (x y d : PureExpr) :
+    opt (.nonZero d) (mkDualDivExpr x y d) = fastDual x y d := by
+  simp [opt, mkDualDivExpr, core, smartDiv, fastDual]
+
+theorem elim_checkedDiv_param (num d : PureExpr) (extra : GuardIR) (env : Env) :
+    checkedDivCount (opt (.nonZero d) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    checkedDivCount (opt (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    checkedDivCount (opt (.conj extra (.nonZero d)) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    guardBranchCount (opt (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    execCheckCost env (opt (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 := by
+  simp [opt, core_pure_div, checkedDivCount, guardBranchCount, execCheckCost, evalExpr]
+
+theorem known_ctx_elim_param (x y d : PureExpr) (env : Env) :
+    checkedDivCount (opt (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+    guardBranchCount (opt (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+    execCheckCost env (opt (.nonZero d) (mkDualDivExpr x y d)) = 0 := by
+  rw [opt_known_dual]
+  by_cases hd : evalPure env d = 0 <;>
+    simp [fastDual, checkedDivCount, guardBranchCount, execCheckCost, evalExpr, hd]
+
+theorem unknown_ctx_dedup_param (x y d : PureExpr) (env : Env) (hd : evalPure env d ≠ 0) :
+    execCheckCost env (opt .top (mkDualDivExpr x y d)) ≤ 1 ∧
+    execCheckCost env (mkDualDivExpr x y d) = 2 := by
+  rw [opt_top_dual]
+  simp [guardedDual, fastDual, mkDualDivExpr, execCheckCost, guardEvalCost, evalGuard, evalExpr, hd]
+
+theorem zero_div_trap_param (x y d : PureExpr) (env : Env) (hd : evalPure env d = 0) :
+    evalExpr env (opt .top (mkDualDivExpr x y d)) = .trap := by
+  rw [opt_top_dual]
+  simp [guardedDual, mkDualDivExpr, evalExpr, evalGuard, hd]
+
+
+theorem opt_guarded (ctx : GuardIR) (e : Expr) :
+    GuardedEquiv (liftEval evalExpr) (denoteGuard ctx) (opt ctx e) e := by
+  intro P hP
+  funext env out
+  apply propext
+  constructor
+  · rintro ⟨hp, ho⟩
+    exact ⟨hp, (opt_sound ctx e env (hP env hp)).symm.trans ho⟩
+  · rintro ⟨hp, ho⟩
+    exact ⟨hp, (opt_sound ctx e env (hP env hp)).trans ho⟩
+
+theorem known_ctx_elim (env : Env) :
+    checkedDivCount (opt (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+    guardBranchCount (opt (.nonZero (.var 0)) m1BenchExpr) = 0 ∧
+    execCheckCost env (opt (.nonZero (.var 0)) m1BenchExpr) = 0 := by
+  exact known_ctx_elim_param (.var 1) (.var 2) (.var 0) env
+theorem unknown_ctx_dedup (env : Env) (h : env 0 ≠ 0) :
+    execCheckCost env (opt .top m1BenchExpr) ≤ 1 ∧ execCheckCost env m1BenchExpr = 2 := by
+  exact unknown_ctx_dedup_param (.var 1) (.var 2) (.var 0) env h
+theorem zero_div_trap (env : Env) (h : env 0 = 0) :
+    evalExpr env (opt .top m1BenchExpr) = .trap := by
+  exact zero_div_trap_param (.var 1) (.var 2) (.var 0) env h
+
+
+theorem core_cancel_left (x d : PureExpr) :
+    core (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d)) = .pure x := by
+  by_cases hx : x = d
+  · subst x
+    simp [core, smartDiv]
+  · simp [core, smartDiv, hx]
+
+theorem cancel_div_param (x d : PureExpr) :
+    divOpCount (opt (.nonZero d) (mkCancelExpr x d)) = 0 ∧
+    divOpCount (opt (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d))) = 0 := by
+  simp [opt, core_cancel_right, core_cancel_left, divOpCount]
+
+theorem compositional_binary (d : PureExpr) (e₁ e₂ : Expr)
+    (h₁ : checkedDivCount (opt (.nonZero d) e₁) = 0 ∧
+      guardBranchCount (opt (.nonZero d) e₁) = 0)
+    (h₂ : checkedDivCount (opt (.nonZero d) e₂) = 0 ∧
+      guardBranchCount (opt (.nonZero d) e₂) = 0) :
+    checkedDivCount (opt (.nonZero d) (.add e₁ e₂)) = 0 ∧
+    checkedDivCount (opt (.nonZero d) (.sub e₁ e₂)) = 0 ∧
+    checkedDivCount (opt (.nonZero d) (.mul e₁ e₂)) = 0 := by
+  simp [opt] at h₁ h₂
+  simp [opt, core, checkedDivCount, h₁.1, h₂.1]
+
+theorem cancel_div : divOpCount (opt (.nonZero (.var 0)) m1CancelExpr) = 0 := by
+  exact (cancel_div_param (.var 1) (.var 0)).1
+
+
+/-- Every compiler-dependent obligation in the revised M1 interface, including the original contract. -/
+structure UpdatedObligations
+    (synthFn : GuardIR → GuardIR → GuardIR) (optFn : GuardIR → Expr → Expr) : Prop where
+  original : M1.CompilerObligations synthFn optFn
+  topRight : ∀ a, synthFn a .top = .top
+  botLeft : ∀ b, synthFn .bot b = .top
+  topLeftNZ : ∀ p, synthFn .top (.nonZero p) = .nonZero p
+  dischargeLeft : ∀ p rest, synthFn (.conj (.nonZero p) rest) (.nonZero p) = .top
+  dischargeRight : ∀ rest p, synthFn (.conj rest (.nonZero p)) (.nonZero p) = .top
+  dedupConj : ∀ p, synthFn .top (.conj (.nonZero p) (.nonZero p)) = .nonZero p
+  elimParam : ∀ num d extra env,
+    checkedDivCount (optFn (.nonZero d) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    checkedDivCount (optFn (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    checkedDivCount (optFn (.conj extra (.nonZero d)) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    guardBranchCount (optFn (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0 ∧
+    execCheckCost env (optFn (.conj (.nonZero d) extra) (.checkedDiv (.pure num) (.pure d))) = 0
+  cancelParam : ∀ x d,
+    divOpCount (optFn (.nonZero d) (mkCancelExpr x d)) = 0 ∧
+    divOpCount (optFn (.nonZero d) (.checkedDiv (.mul (.pure d) (.pure x)) (.pure d))) = 0
+  compositional : ∀ d e₁ e₂,
+    (checkedDivCount (optFn (.nonZero d) e₁) = 0 ∧ guardBranchCount (optFn (.nonZero d) e₁) = 0) →
+    (checkedDivCount (optFn (.nonZero d) e₂) = 0 ∧ guardBranchCount (optFn (.nonZero d) e₂) = 0) →
+    checkedDivCount (optFn (.nonZero d) (.add e₁ e₂)) = 0 ∧
+    checkedDivCount (optFn (.nonZero d) (.sub e₁ e₂)) = 0 ∧
+    checkedDivCount (optFn (.nonZero d) (.mul e₁ e₂)) = 0
+  knownParam : ∀ x y d env,
+    checkedDivCount (optFn (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+    guardBranchCount (optFn (.nonZero d) (mkDualDivExpr x y d)) = 0 ∧
+    execCheckCost env (optFn (.nonZero d) (mkDualDivExpr x y d)) = 0
+  dedupParam : ∀ x y d env, evalPure env d ≠ 0 →
+    execCheckCost env (optFn .top (mkDualDivExpr x y d)) ≤ 1 ∧
+    execCheckCost env (mkDualDivExpr x y d) = 2
+  trapParam : ∀ x y d env, evalPure env d = 0 →
+    evalExpr env (optFn .top (mkDualDivExpr x y d)) = .trap
+
+theorem original_obligations : M1.CompilerObligations synth opt where
+  guardDenote := synth_denote
+  universal := synth_universal
+  selfDischarge := synth_self
+  guarded := opt_guarded
+  sound := opt_sound
+  known := known_ctx_elim
+  cancel := cancel_div
+  dedup := unknown_ctx_dedup
+  trap := zero_div_trap
+
+theorem all_obligations : UpdatedObligations synth opt where
+  original := original_obligations
+  topRight := synth_top_right
+  botLeft := synth_bot_left
+  topLeftNZ := synth_top_left_nonZero
+  dischargeLeft := synth_conj_left
+  dischargeRight := synth_conj_right
+  dedupConj := synth_dedup
+  elimParam := elim_checkedDiv_param
+  cancelParam := cancel_div_param
+  compositional := compositional_binary
+  knownParam := known_ctx_elim_param
+  dedupParam := unknown_ctx_dedup_param
+  trapParam := zero_div_trap_param
+
+theorem updated_obligations_satisfiable :
+    ∃ (synthFn : GuardIR → GuardIR → GuardIR) (optFn : GuardIR → Expr → Expr),
+      UpdatedObligations synthFn optFn := by
+  exact ⟨synth, opt, all_obligations⟩
+
+/-- The old optimizer is rejected independently of which guard synthesizer accompanies it. -/
+theorem fixture_optimizer_rejected (synthFn : GuardIR → GuardIR → GuardIR) :
+    ¬ UpdatedObligations synthFn M1.opt := by
+  intro h
+  have bad := (h.knownParam (.var 2) (.var 4) (.var 3) M1.positiveEnv).1
+  have two : checkedDivCount (M1.opt (.nonZero (.var 3))
+      (mkDualDivExpr (.var 2) (.var 4) (.var 3))) = 2 := by decide
+  rw [two] at bad
+  cases bad
+
+/-- The old residual wrapper separately fails the new normalization contract. -/
+theorem old_synth_rejected (optFn : GuardIR → Expr → Expr) :
+    ¬ UpdatedObligations M1.synth optFn := by
+  intro h
+  have bad := h.topLeftNZ (.var 0)
+  change GuardIR.imp .top (.nonZero (.var 0)) = .nonZero (.var 0) at bad
+  cases bad
+
+def sampleX : PureExpr := .add (.var 7) (.lit 1)
+def sampleY : PureExpr := .mul (.var 9) (.lit 3)
+def sampleD : PureExpr := .lit 2
+def sampleEnv : Env := fun _ => 4
+def sampleExpr : Expr := mkDualDivExpr sampleX sampleY sampleD
+def nestedExpr : Expr :=
+  .sub (.add (.checkedDiv (.pure sampleX) (.pure sampleD))
+    (mkCancelExpr sampleY sampleD)) (.pure (.lit 0))
+
+theorem generalized_positive_witness :
+    evalGuard sampleEnv (.nonZero sampleD) = true ∧
+    evalExpr sampleEnv sampleExpr = .val 14 ∧
+    evalExpr sampleEnv (opt .top sampleExpr) = .val 14 ∧
+    execCheckCost sampleEnv sampleExpr = 2 ∧
+    execCheckCost sampleEnv (opt .top sampleExpr) = 1 ∧
+    checkedDivCount (opt (.nonZero sampleD) nestedExpr) = 0 ∧
+    guardBranchCount (opt (.nonZero sampleD) nestedExpr) = 0 ∧
+    evalExpr sampleEnv (opt (.nonZero sampleD) nestedExpr) = .val 14 := by
+  decide
+
+theorem renamed_reduction :
+    checkedDivCount (opt (.nonZero (.var 3)) M1.renamedBench) = 0 ∧
+    checkedDivCount (M1.opt (.nonZero (.var 3)) M1.renamedBench) = 2 := by
+  decide
+
+theorem normalization_witness :
+    synth .top (.nonZero sampleD) = .nonZero sampleD ∧
+    synth .top (.conj (.nonZero sampleD) (.nonZero sampleD)) = .nonZero sampleD ∧
+    synth (.conj (.eq (.var 8) (.lit 4)) (.nonZero sampleD)) (.nonZero sampleD) = .top := by
+  decide
+
+theorem generalized_zero_trap :
+    evalExpr sampleEnv (opt .top (mkDualDivExpr sampleX sampleY (.lit 0))) = .trap := by
+  decide
+
+end M1R2
+
 end CatSem.RedTeam
+
+/- This check is intentionally outside the semantic namespace: it inspects
+   proof dependencies rather than becoming one of the semantic declarations. -/
+open Lean Elab Command in
+run_cmd do
+  let env ← getEnv
+  let names := env.constants.toList.filterMap fun (name, _) =>
+    let fromDefs := match env.getModuleIdxFor? name with
+      | some idx => env.header.moduleNames[idx.toNat]? == some `Specs.Defs
+      | none => false
+    if (`CatSem.RedTeam).isPrefixOf name || fromDefs then some name else none
+  if names.isEmpty then throwError "No audit declarations found"
+  for name in names do
+    let axioms ← liftCoreM <| Lean.collectAxioms name
+    let bad := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
+    unless bad.isEmpty do
+      throwError m!"Forbidden dependencies for {name}: {bad}"
+    if axioms.isEmpty then
+      logInfo m!"'{name}' does not depend on any axioms"
+    else
+      logInfo m!"'{name}' depends on axioms: [{String.intercalate ", " (axioms.toList.map Name.toString)}]"
+

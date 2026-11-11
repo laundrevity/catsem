@@ -1,16 +1,54 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "$(basename "$SCRIPT_ROOT")" != "main" && -d "$SCRIPT_ROOT/../main" ]]; then
+  cd "$SCRIPT_ROOT/../main"
+else
+  cd "$SCRIPT_ROOT"
+fi
 
-echo "=== Syncing Specs/ and blueprint/ from wt-antigravity -> main, wt-claude, wt-codex ==="
-cp ../wt-antigravity/Specs/*.lean Specs/
-cp ../wt-antigravity/blueprint/lemma_dag.json blueprint/
+echo "=== Syncing Specs/{Defs,Target,Verify}.lean, blueprint/, CHARTER.md, and gate scripts ==="
+for f in Defs.lean Target.lean Verify.lean; do
+  cp "../wt-antigravity/Specs/$f" "Specs/$f"
+  cp "Specs/$f" "../wt-claude/Specs/$f"
+  cp "Specs/$f" "../wt-codex/Specs/$f"
+done
 
-cp Specs/*.lean ../wt-claude/Specs/
-cp blueprint/lemma_dag.json ../wt-claude/blueprint/
+cp ../wt-antigravity/blueprint/lemma_dag.json blueprint/lemma_dag.json
+cp blueprint/lemma_dag.json ../wt-claude/blueprint/lemma_dag.json
+cp blueprint/lemma_dag.json ../wt-codex/blueprint/lemma_dag.json
 
-cp Specs/*.lean ../wt-codex/Specs/
-cp blueprint/lemma_dag.json ../wt-codex/blueprint/
+mkdir -p scripts reviews
+cp ../wt-antigravity/scripts/* scripts/
+chmod +x scripts/*.sh scripts/*.py
 
-echo "✅ Specs synced across all worktrees."
+if [[ -f ../wt-antigravity/reviews/M1-prelock-r3-disposition.md ]]; then
+  cp ../wt-antigravity/reviews/M1-prelock-r3-disposition.md reviews/M1-prelock-r3-disposition.md
+fi
+
+SPEC_SHA=$(shasum -a 256 Specs/Defs.lean Specs/Target.lean Specs/Verify.lean blueprint/lemma_dag.json | shasum -a 256 | awk '{print $1}')
+echo "$SPEC_SHA" > reviews/current_spec.sha256
+
+GATE_SHA=$(shasum -a 256 CHARTER.md scripts/verify.sh scripts/check_axioms.py scripts/audit_modules.py scripts/sync_specs.sh scripts/sync_for_audit.sh scripts/test_gate_regressions.py | shasum -a 256 | awk '{print $1}')
+echo "$GATE_SHA" > reviews/current_gate.sha256
+
+for wt in ../wt-antigravity ../wt-claude ../wt-codex; do
+  mkdir -p "$wt/scripts" "$wt/reviews"
+  cp CHARTER.md "$wt/CHARTER.md"
+  cp scripts/verify.sh scripts/check_axioms.py scripts/audit_modules.py scripts/sync_specs.sh scripts/sync_for_audit.sh scripts/test_gate_regressions.py "$wt/scripts/"
+  chmod +x "$wt/scripts/"*.sh "$wt/scripts/"*.py
+  cp reviews/current_spec.sha256 reviews/current_gate.sha256 "$wt/reviews/"
+  cp reviews/M1-prelock-r1.md reviews/M1-prelock-r1-disposition.md "$wt/reviews/"
+  cp reviews/M1-prelock-r2.md reviews/M1-prelock-r2-disposition.md "$wt/reviews/"
+  if [[ -f reviews/M1-prelock-r3.md ]]; then
+    cp reviews/M1-prelock-r3.md "$wt/reviews/"
+  fi
+  if [[ -f reviews/M1-prelock-r3-disposition.md ]]; then
+    cp reviews/M1-prelock-r3-disposition.md "$wt/reviews/"
+  fi
+done
+
+echo "✅ Synced across all worktrees:"
+echo "   Spec Digest: $SPEC_SHA"
+echo "   Gate Digest: $GATE_SHA"
