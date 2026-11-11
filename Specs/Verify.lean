@@ -199,6 +199,38 @@ example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
         evalβ ((E.comp (L.iterate n)).post (a₀ ⊓ CatSem.hoistLoopGuard E a₀ inv)) t₂ :=
   CatSem.guardedEquiv_hoistLoopGuard_iterate E L evalβ a₀ inv q t₁ t₂ hind heq
 
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hcompat : CatSem.CompatibleOp2 eval op semOp)
+    (h₁ : CatSem.GuardedEquiv eval p₁ t₁ u₁) (h₂ : CatSem.GuardedEquiv eval p₂ t₂ u₂) :
+    CatSem.GuardedEquiv eval (p₁ ⊓ p₂) (op t₁ t₂) (op u₁ u₂) :=
+  CatSem.guardedEquiv_congr2 eval op semOp p₁ p₂ t₁ u₁ t₂ u₂ hcompat h₁ h₂
+
+example {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (a p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hcompat : CatSem.CompatibleOp2 eval op semOp)
+    (h₁ : CatSem.GuardedEquiv eval p₁ t₁ u₁) (h₂ : CatSem.GuardedEquiv eval p₂ t₂ u₂) :
+    eval (a ⊓ (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂)) (op t₁ t₂) =
+      eval (a ⊓ (CatSem.synthesizeGuard a p₁ ⊓ CatSem.synthesizeGuard a p₂)) (op u₁ u₂) :=
+  CatSem.guardedEquiv_congr2_synthesize eval op semOp a p₁ p₂ t₁ u₁ t₂ u₂ hcompat h₁ h₂
+
+example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CatSem.CFGTransfer α β) (evalβ : β → Term → Val)
+    (q₁ q₂ : β) (t₁ t₂ : Term) :
+    CatSem.GuardedEquiv (CatSem.pullbackEval T evalβ) (T.pullback (q₁ ⊓ q₂)) t₁ t₂ ↔
+      CatSem.GuardedEquiv (CatSem.pullbackEval T evalβ) (T.pullback q₁ ⊓ T.pullback q₂) t₁ t₂ :=
+  CatSem.guardedEquiv_pullback_inf_commute T evalβ q₁ q₂ t₁ t₂
+
+example {α γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
+    (P₁ P₂ : CatSem.CFGTransfer α γ) (evalγ : γ → Term → Val)
+    (a : α) (c : γ) (t₁ t₂ : Term) (h : CatSem.GuardedEquiv evalγ c t₁ t₂) :
+    let g := CatSem.synthesizeEdgeGuard P₁ a c ⊓ CatSem.synthesizeEdgeGuard P₂ a c
+    evalγ (P₁.post (a ⊓ g)) t₁ = evalγ (P₁.post (a ⊓ g)) t₂ ∧
+      evalγ (P₂.post (a ⊓ g)) t₁ = evalγ (P₂.post (a ⊓ g)) t₂ :=
+  CatSem.guardedEquiv_diamond P₁ P₂ evalγ a c t₁ t₂ h
+
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -233,5 +265,9 @@ example {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
 #print axioms CatSem.guardedEquiv_pullback
 #print axioms CatSem.guardedEquiv_edge_synthesize
 #print axioms CatSem.guardedEquiv_hoistLoopGuard_iterate
+#print axioms CatSem.guardedEquiv_congr2
+#print axioms CatSem.guardedEquiv_congr2_synthesize
+#print axioms CatSem.guardedEquiv_pullback_inf_commute
+#print axioms CatSem.guardedEquiv_diamond
 
 end CatSem.Verify

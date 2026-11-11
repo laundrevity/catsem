@@ -145,4 +145,16 @@ example (eval : Prop → ℕ → ℕ) (s : Prop) (t : ℕ) :
     pullbackEval (CFGTransfer.id Prop) eval s t = eval s t := by
   rfl
 
+/-- Denotational compositionality (semantic compatibility) for a binary IR constructor
+    `op : Term → Term → Term` and a stage-indexed semantic combiner
+    `semOp : α → Val → Val → Val`. -/
+def CompatibleOp2 {α Term Val : Type*}
+    (eval : α → Term → Val) (op : Term → Term → Term) (semOp : α → Val → Val → Val) : Prop :=
+  ∀ s t₁ t₂, eval s (op t₁ t₂) = semOp s (eval s t₁) (eval s t₂)
+
+-- Sanity checks on denotational compositionality
+example : CompatibleOp2 (fun (_ : Prop) (n : ℕ) => n) (· + ·) (fun _ x y => x + y) := by
+  intro _ _ _
+  rfl
+
 end CatSem

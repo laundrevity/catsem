@@ -288,4 +288,53 @@ theorem guardedEquiv_hoistLoopGuard_iterate (E : CFGTransfer α β) (L : CFGTran
   intro n
   exact heq _ (forcesAfter_hoistLoopGuard_iterate E L a₀ inv q hind n)
 
+/-- Binary Congruence of Guarded Equivalence: Under `CompatibleOp2 eval op semOp`,
+    guarded equivalences on subterms compose under the meet of their guards. -/
+theorem guardedEquiv_congr2 (eval : α → Term → Val)
+    (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hcompat : CompatibleOp2 eval op semOp)
+    (h₁ : GuardedEquiv eval p₁ t₁ u₁) (h₂ : GuardedEquiv eval p₂ t₂ u₂) :
+    GuardedEquiv eval (p₁ ⊓ p₂) (op t₁ t₂) (op u₁ u₂) := by
+  intro s hs
+  unfold Forces at hs
+  rw [hcompat s t₁ t₂, hcompat s u₁ u₂]
+  exact congrArg₂ (semOp s) (h₁ s (hs.trans inf_le_left)) (h₂ s (hs.trans inf_le_right))
+
+/-- Abductive Binary Congruence Soundness: Under `CompatibleOp2 eval op semOp`,
+    `GuardedEquiv eval p₁ t₁ u₁`, and `GuardedEquiv eval p₂ t₂ u₂`, at any stage `a : α`,
+    conjoining `a` with `synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂` guarantees
+    `op t₁ t₂` and `op u₁ u₂` evaluate identically at the guarded stage. -/
+theorem guardedEquiv_congr2_synthesize (eval : α → Term → Val)
+    (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (a p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hcompat : CompatibleOp2 eval op semOp)
+    (h₁ : GuardedEquiv eval p₁ t₁ u₁) (h₂ : GuardedEquiv eval p₂ t₂ u₂) :
+    eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) (op t₁ t₂) =
+      eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) (op u₁ u₂) := by
+  apply guardedEquiv_congr2 eval op semOp p₁ p₂ t₁ u₁ t₂ u₂ hcompat h₁ h₂
+  exact (forces_rewrite_chain_iff a p₁ p₂ _).mpr le_rfl
+
+/-- Pullback Meet Commutativity for Guarded Equivalence: Across any `T : CFGTransfer α β`,
+    guarded equivalence under `T.pullback (q₁ ⊓ q₂)` is equivalent to guarded equivalence
+    under `T.pullback q₁ ⊓ T.pullback q₂`. -/
+theorem guardedEquiv_pullback_inf_commute (T : CFGTransfer α β) (evalβ : β → Term → Val)
+    (q₁ q₂ : β) (t₁ t₂ : Term) :
+    GuardedEquiv (pullbackEval T evalβ) (T.pullback (q₁ ⊓ q₂)) t₁ t₂ ↔
+      GuardedEquiv (pullbackEval T evalβ) (T.pullback q₁ ⊓ T.pullback q₂) t₁ t₂ := by
+  rw [pullback_map_inf T q₁ q₂]
+
+/-- Diamond Join Guarded Rewrite Soundness: Given two converging CFG paths
+    `P₁ P₂ : CFGTransfer α γ` and a downstream rewrite `GuardedEquiv evalγ c t₁ t₂`,
+    conjoining `a` with `g := synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c`
+    guarantees `t₁` and `t₂` evaluate identically along both paths at the join block. -/
+theorem guardedEquiv_diamond (P₁ P₂ : CFGTransfer α γ) (evalγ : γ → Term → Val)
+    (a : α) (c : γ) (t₁ t₂ : Term) (h : GuardedEquiv evalγ c t₁ t₂) :
+    let g := synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c
+    evalγ (P₁.post (a ⊓ g)) t₁ = evalγ (P₁.post (a ⊓ g)) t₂ ∧
+      evalγ (P₂.post (a ⊓ g)) t₁ = evalγ (P₂.post (a ⊓ g)) t₂ := by
+  intro g
+  have hj := (synthesizeDiamondGuard_iff P₁ P₂ a c g).mpr le_rfl
+  exact ⟨h _ (le_sup_left.trans hj), h _ (le_sup_right.trans hj)⟩
+
 end CatSem

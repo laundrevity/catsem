@@ -255,6 +255,36 @@
         "forcesAfter_hoistLoopGuard_iterate"
       ],
       "informal_claim": "If IsInductiveFor L inv q and GuardedEquiv eval_beta q t1 t2, then for every iteration count n : Nat, eval_beta ((E.comp (L.iterate n)).post (a0 meet hoistLoopGuard E a0 inv)) t1 = eval_beta ((E.comp (L.iterate n)).post (a0 meet hoistLoopGuard E a0 inv)) t2."
+    },
+    {
+      "id": "guardedEquiv_congr2",
+      "status": "spec_locked",
+      "informal_claim": "If CompatibleOp2 eval op semOp, GuardedEquiv eval p1 t1 u1, and GuardedEquiv eval p2 t2 u2, then GuardedEquiv eval (p1 meet p2) (op t1 t2) (op u1 u2)."
+    },
+    {
+      "id": "guardedEquiv_congr2_synthesize",
+      "status": "spec_locked",
+      "depends_on": [
+        "guardedEquiv_congr2",
+        "forces_rewrite_chain_iff"
+      ],
+      "informal_claim": "Under CompatibleOp2 eval op semOp, GuardedEquiv eval p1 t1 u1, and GuardedEquiv eval p2 t2 u2, at any stage a, conjoining a with synthesizeGuard a p1 meet synthesizeGuard a p2 guarantees eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) (op t1 t2) = eval (a meet (synthesizeGuard a p1 meet synthesizeGuard a p2)) (op u1 u2)."
+    },
+    {
+      "id": "guardedEquiv_pullback_inf_commute",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullback_map_inf"
+      ],
+      "informal_claim": "Across any T : CFGTransfer alpha beta, GuardedEquiv (pullbackEval T eval_beta) (T.pullback (q1 meet q2)) t1 t2 iff GuardedEquiv (pullbackEval T eval_beta) (T.pullback q1 meet T.pullback q2) t1 t2."
+    },
+    {
+      "id": "guardedEquiv_diamond",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeDiamondGuard_iff"
+      ],
+      "informal_claim": "Given two converging CFG paths P1, P2 : CFGTransfer alpha gamma and GuardedEquiv eval_gamma c t1 t2, defining g := synthesizeEdgeGuard P1 a c meet synthesizeEdgeGuard P2 a c guarantees both eval_gamma (P1.post (a meet g)) t1 = eval_gamma (P1.post (a meet g)) t2 and eval_gamma (P2.post (a meet g)) t1 = eval_gamma (P2.post (a meet g)) t2."
     }
   ]
 }

@@ -4,13 +4,13 @@ import Mathlib.Order.BooleanAlgebra.Basic
 /-!
 # Guard-synthesis specification audit
 
-The target statements through Round 9 match their blueprint claims after unfolding
+The target statements through Round 10 match their blueprint claims after unfolding
 the synthesis definitions. The earlier mismatch between the weakest-guard
 implication and the blueprint's iff has been resolved: the blueprint now
 separates `synthesizeGuard_weakest` from `synthesizeGuard_adjunction`.
 `blueprint_adjunction` checks the equivalence independently below.
 
-All thirty-four declarations in `Specs.Target` currently have placeholder proofs. None
+All thirty-eight declarations in `Specs.Target` currently have placeholder proofs. None
 of the proofs below invokes them: importing a placeholder must not turn an
 audit into circular evidence. The Bool cases use kernel-checked `decide`;
 the Prop proofs use conjunction and implication directly. The constructive
@@ -1789,5 +1789,261 @@ theorem rewrite_equivalence_required :
   decide
 
 end Round9
+
+/-!
+## Round 10: binary compositionality and diamond congruence
+
+The definition and all four statements match the blueprint exactly.
+`CompatibleOp2` supplies compositionality at each stage, for every operand
+pair; the semantic combiner may depend on that stage. No associativity,
+commutativity, or cross-stage law is required. Pullback-meet commutation
+replaces equal guards, without assuming the evaluator preserves meets.
+Diamond soundness establishes original/rewritten equality separately along
+each path; it does not equate the values reached by different paths.
+
+The concrete constructor is AST addition from Round 8, with both natural
+addition and Boolean disjunction interpretations. The numeric congruence
+test rewrites original -> middle in the left operand and middle -> optimized
+in the right. At stage 001 both compound terms evaluate to 2, while at 111
+they evaluate to 5 and 3. A syntax-sensitive operator demonstrates that the
+compatibility premise is essential, and has no compatible semantic combiner.
+
+The diamond paths have posts (x,z,false) and (y,z,z), with their respective
+right adjoints. For target guard 011 and source 111, the individual guards
+are 011 and 101 and their meet is the nonbottom stage 001. The paths reach
+010 and 011. Addition congruence holds on both, with values 1 and 3, so the
+within-path/cross-path distinction is observable. Independent numeric checks
+cover 64 congruence guard pairs, 512 synthesis combinations, 128 pullback-meet
+cases, and 64 diamond cases: 768 cases in total, plus explicit witnesses.
+All proofs remain independent of the target placeholders and of choice.
+-/
+
+namespace Round10
+
+/-- Independent congruence proof, applying both operand equalities at one stage. -/
+theorem binary_congr {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hc : CompatibleOp2 eval op semOp)
+    (h₁ : GuardedEquiv eval p₁ t₁ u₁) (h₂ : GuardedEquiv eval p₂ t₂ u₂) :
+    GuardedEquiv eval (p₁ ⊓ p₂) (op t₁ t₂) (op u₁ u₂) := by
+  intro s hs
+  rw [hc s t₁ t₂, hc s u₁ u₂, h₁ s (hs.trans inf_le_left), h₂ s (hs.trans inf_le_right)]
+
+/-- Independent synthesized congruence proof using the audited forcing equivalence. -/
+theorem binary_synthesize {α Term Val : Type*} [HeytingAlgebra α]
+    (eval : α → Term → Val) (op : Term → Term → Term) (semOp : α → Val → Val → Val)
+    (a p₁ p₂ : α) (t₁ u₁ t₂ u₂ : Term)
+    (hc : CompatibleOp2 eval op semOp)
+    (h₁ : GuardedEquiv eval p₁ t₁ u₁) (h₂ : GuardedEquiv eval p₂ t₂ u₂) :
+    eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) (op t₁ t₂) =
+      eval (a ⊓ (synthesizeGuard a p₁ ⊓ synthesizeGuard a p₂)) (op u₁ u₂) := by
+  exact binary_congr eval op semOp p₁ p₂ t₁ u₁ t₂ u₂ hc h₁ h₂ _
+    ((Round7.rewrite_chain a p₁ p₂ _).mpr le_rfl)
+
+/-- Equal pulled-back guards give the same guarded-equivalence proposition. -/
+theorem pullback_meet_commute {α β Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra β]
+    (T : CFGTransfer α β) (evalβ : β → Term → Val) (q₁ q₂ : β) (t₁ t₂ : Term) :
+    GuardedEquiv (pullbackEval T evalβ) (T.pullback (q₁ ⊓ q₂)) t₁ t₂ ↔
+      GuardedEquiv (pullbackEval T evalβ) (T.pullback q₁ ⊓ T.pullback q₂) t₁ t₂ := by
+  rw [Round3.pullback_meet]
+
+/-- Each path establishes c, so the downstream equivalence applies separately to both. -/
+theorem diamond_rewrite {α γ Term Val : Type*} [HeytingAlgebra α] [HeytingAlgebra γ]
+    (P₁ P₂ : CFGTransfer α γ) (evalγ : γ → Term → Val)
+    (a : α) (c : γ) (t₁ t₂ : Term) (h : GuardedEquiv evalγ c t₁ t₂) :
+    let g := synthesizeEdgeGuard P₁ a c ⊓ synthesizeEdgeGuard P₂ a c
+    evalγ (P₁.post (a ⊓ g)) t₁ = evalγ (P₁.post (a ⊓ g)) t₂ ∧
+      evalγ (P₂.post (a ⊓ g)) t₁ = evalγ (P₂.post (a ⊓ g)) t₂ := by
+  exact ⟨h _ ((P₁.gc _ _).mpr (le_himp_iff'.mp inf_le_left)),
+    h _ ((P₂.gc _ _).mpr (le_himp_iff'.mp inf_le_right))⟩
+
+open Round8
+
+/-- Compatibility of actual AST addition holds for every stage and operand syntax. -/
+theorem addition_compatible : CompatibleOp2 evalNat IR.add (fun _ x y => x + y) := by
+  intro s l r
+  rfl
+
+/-- The same constructor is compatible with its Boolean interpretation. -/
+theorem or_compatible : CompatibleOp2 evalBool IR.add (fun _ x y => x || y) := by
+  intro s l r
+  rfl
+
+def compoundBefore : IR := .add original middle
+def compoundAfter : IR := .add middle optimized
+def diamondBefore : IR := .add original (.add .zero .z)
+def diamondAfter : IR := .add middle .z
+
+/-- Nonidentity, nonconstant converging transfers with independent source restrictions. -/
+def path (first : Bool) : CFGTransfer Stage Stage where
+  post s := if first then (s.1, s.2.2, false) else (s.2.1, s.2.2, s.2.2)
+  pullback q := if first then (q.1, true, q.2.1) else (true, q.1, q.2.1 && q.2.2)
+  gc := by
+    rintro ⟨s₁, s₂, s₃⟩ ⟨q₁, q₂, q₃⟩
+    cases first <;> cases s₁ <;> cases s₂ <;> cases s₃ <;>
+      cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- Both directions of each path are nonidentity and nonconstant. -/
+theorem paths_nontrivial (first : Bool) :
+    (path first).post (false, true, false) ≠ (false, true, false) ∧
+    (path first).pullback (false, false, false) ≠ (false, false, false) ∧
+    (path first).post (false, false, false) ≠ (path first).post (true, true, true) ∧
+    (path first).pullback (false, false, false) ≠ (path first).pullback (true, true, true) := by
+  cases first <;> decide
+
+/-- The right operand in the diamond example undergoes an actual zero-addition rewrite. -/
+theorem zero_add_z_guard : GuardedEquiv evalNat guardX (.add .zero .z) .z := by
+  rw [guarded_cube_iff]
+  decide
+
+/-- Construct the downstream diamond rewrite using binary compositionality. -/
+theorem diamond_equivalence : GuardedEquiv evalNat guardX diamondBefore diamondAfter := by
+  have h := binary_congr evalNat IR.add (fun _ x y => x + y) guardX guardX
+    original middle (.add .zero .z) .z addition_compatible
+    concrete_rewrites.1 zero_add_z_guard
+  simpa only [inf_idem, diamondBefore, diamondAfter] using h
+
+/-- Exact guard classification for the numeric two-operand congruence example. -/
+theorem compound_guards (p : Stage) :
+    GuardedEquiv evalNat p compoundBefore compoundAfter ↔ p.1 = false ∧ p.2.1 = false := by
+  rw [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- Exact downstream guard classification for the diamond's compound terms. -/
+theorem diamond_guards (p : Stage) :
+    GuardedEquiv evalNat p diamondBefore diamondAfter ↔ p.1 = false := by
+  rw [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases x <;> cases y <;> cases z <;> decide
+
+/-- The two paths pull the downstream restriction back to different source coordinates. -/
+theorem transported_guards (first : Bool) (p : Stage) :
+    GuardedEquiv (pullbackEval (path first) evalNat) p diamondBefore diamondAfter ↔
+      if first then p.1 = false else p.2.1 = false := by
+  rw [guarded_cube_iff]
+  rcases p with ⟨x, y, z⟩
+  cases first <;> cases x <;> cases y <;> cases z <;> decide
+
+/-- All 64 operand-guard pairs, keeping the two rewrite premises separate. -/
+theorem finite_congr (p q : Stage) :
+    GuardedEquiv evalNat p original middle → GuardedEquiv evalNat q middle optimized →
+      GuardedEquiv evalNat (p ⊓ q) compoundBefore compoundAfter := by
+  rw [(nat_guard_classification p).1, (nat_guard_classification q).2.1, compound_guards]
+  rcases p with ⟨p₁, p₂, p₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases p₁ <;> cases p₂ <;> cases p₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- All 512 source/operand-guard/operand-guard synthesis cases. -/
+theorem finite_synthesis (a p q : Stage) :
+    GuardedEquiv evalNat p original middle → GuardedEquiv evalNat q middle optimized →
+      evalNat (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) compoundBefore =
+        evalNat (a ⊓ (synthesizeGuard a p ⊓ synthesizeGuard a q)) compoundAfter := by
+  rw [(nat_guard_classification p).1, (nat_guard_classification q).2.1]
+  rcases a with ⟨a₁, a₂, a₃⟩
+  rcases p with ⟨p₁, p₂, p₃⟩
+  rcases q with ⟨q₁, q₂, q₃⟩
+  cases a₁ <;> cases a₂ <;> cases a₃ <;> cases p₁ <;> cases p₂ <;>
+    cases p₃ <;> cases q₁ <;> cases q₂ <;> cases q₃ <;> decide
+
+/-- All 128 path/target/target cases, computed independently of the general meet proof. -/
+theorem finite_pullback_meet (first : Bool) (q₁ q₂ : Stage) :
+    GuardedEquiv (pullbackEval (path first) evalNat) ((path first).pullback (q₁ ⊓ q₂))
+      diamondBefore diamondAfter ↔
+    GuardedEquiv (pullbackEval (path first) evalNat)
+      ((path first).pullback q₁ ⊓ (path first).pullback q₂) diamondBefore diamondAfter := by
+  simp only [transported_guards]
+  rcases q₁ with ⟨u₁, u₂, u₃⟩
+  rcases q₂ with ⟨v₁, v₂, v₃⟩
+  cases first <;> cases u₁ <;> cases u₂ <;> cases u₃ <;>
+    cases v₁ <;> cases v₂ <;> cases v₃ <;> decide
+
+/-- All 64 source/target diamond cases for the compatible compound rewrite. -/
+theorem finite_diamond (a c : Stage) :
+    GuardedEquiv evalNat c diamondBefore diamondAfter →
+      let g := synthesizeEdgeGuard (path true) a c ⊓ synthesizeEdgeGuard (path false) a c
+      evalNat ((path true).post (a ⊓ g)) diamondBefore =
+        evalNat ((path true).post (a ⊓ g)) diamondAfter ∧
+      evalNat ((path false).post (a ⊓ g)) diamondBefore =
+        evalNat ((path false).post (a ⊓ g)) diamondAfter := by
+  rw [diamond_guards]
+  rcases a with ⟨a₁, a₂, a₃⟩
+  rcases c with ⟨c₁, c₂, c₃⟩
+  cases a₁ <;> cases a₂ <;> cases a₃ <;> cases c₁ <;> cases c₂ <;> cases c₃ <;> decide
+
+/-- Both operand rewrites hold on proper guards; the shared stage gives nonzero compound values. -/
+theorem active_binary_witness :
+    GuardedEquiv evalNat guardX original middle ∧ GuardedEquiv evalNat guardY middle optimized ∧
+    GuardedEquiv evalNat (guardX ⊓ guardY) compoundBefore compoundAfter ∧
+    evalNat (false, false, true) compoundBefore = 2 ∧
+    evalNat (false, false, true) compoundAfter = 2 ∧
+    evalNat (true, true, true) compoundBefore = 5 ∧
+    evalNat (true, true, true) compoundAfter = 3 := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Neither single operand guard, nor their join, suffices for this numeric rewrite. -/
+theorem both_operand_guards_required :
+    ¬ GuardedEquiv evalNat guardX compoundBefore compoundAfter ∧
+    ¬ GuardedEquiv evalNat guardY compoundBefore compoundAfter ∧
+    ¬ GuardedEquiv evalNat (guardX ⊔ guardY) compoundBefore compoundAfter := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- A syntax-sensitive constructor that cannot respect semantic equality of its operands. -/
+def badOp (left _right : IR) : IR :=
+  match left with
+  | .add .x _ => .one
+  | _ => .zero
+
+/-- No semantic combiner can distinguish the identical operand values seen here. -/
+theorem badOp_has_no_semantics (semOp : Stage → ℕ → ℕ → ℕ) :
+    ¬ CompatibleOp2 evalNat badOp semOp := by
+  intro h
+  have h₁ := h (false, false, true) original .zero
+  have h₂ := h (false, false, true) middle .zero
+  change (1 : ℕ) = semOp (false, false, true) 1 0 at h₁
+  change (0 : ℕ) = semOp (false, false, true) 1 0 at h₂
+  have impossible : (1 : ℕ) = 0 := h₁.trans h₂.symm
+  cases impossible
+
+/-- Operand equivalences alone do not imply congruence for an incompatible constructor. -/
+theorem compatibility_required :
+    GuardedEquiv evalNat guardX original middle ∧
+    GuardedEquiv evalNat ⊤ IR.zero IR.zero ∧
+    ¬ GuardedEquiv evalNat (guardX ⊓ ⊤) (badOp original .zero) (badOp middle .zero) := by
+  simp only [guarded_cube_iff]
+  decide
+
+/-- Both diamond guards are restrictive; both reached stages are nonbottom.
+Each path preserves the rewrite, but their common per-path values are different. -/
+theorem active_diamond_witness :
+    let a : Stage := (true, true, true)
+    let g₁ := synthesizeEdgeGuard (path true) a guardX
+    let g₂ := synthesizeEdgeGuard (path false) a guardX
+    let s₁ := (path true).post (a ⊓ (g₁ ⊓ g₂))
+    let s₂ := (path false).post (a ⊓ (g₁ ⊓ g₂))
+    g₁ = guardX ∧ g₂ = guardY ∧ g₁ ⊓ g₂ = (false, false, true) ∧
+    s₁ = (false, true, false) ∧ s₂ = (false, true, true) ∧
+    evalNat s₁ diamondBefore = 1 ∧ evalNat s₁ diamondAfter = 1 ∧
+    evalNat s₂ diamondBefore = 3 ∧ evalNat s₂ diamondAfter = 3 ∧
+    evalNat s₁ diamondBefore ≠ evalNat s₂ diamondBefore := by
+  dsimp only
+  decide
+
+/-- Keeping just one path's guard makes the other path's rewrite fail. -/
+theorem each_path_guard_required :
+    (evalNat ((path true).post guardX) diamondBefore =
+      evalNat ((path true).post guardX) diamondAfter ∧
+     evalNat ((path false).post guardX) diamondBefore ≠
+      evalNat ((path false).post guardX) diamondAfter) ∧
+    (evalNat ((path true).post guardY) diamondBefore ≠
+      evalNat ((path true).post guardY) diamondAfter ∧
+     evalNat ((path false).post guardY) diamondBefore =
+      evalNat ((path false).post guardY) diamondAfter) := by
+  decide
+
+end Round10
 
 end CatSem.RedTeam
