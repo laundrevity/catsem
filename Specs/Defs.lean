@@ -473,4 +473,242 @@ example : evalBlock (fun _ => 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = 
 example : execBlockCheckCost (fun _ => 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = 3 := rfl
 example : evalBlock (fun _ => 1) (mkDeadBranchBlock (.var 0) 1 2 (.lit 7)) = .val 7 := rfl
 
+/-! ## Milestone 3: Trusted Computing Base (Fuel-Indexed Imperative Loops, Havoc Transfers & Loop Cost Observers) -/
+
+/-- Structural syntactic check testing whether variable `v` occurs in a `PureExpr`. -/
+def pureMentionsVar (v : VarId) : PureExpr → Bool
+  | .lit _ => false
+  | .var w => decide (w = v)
+  | .add e₁ e₂ | .sub e₁ e₂ | .mul e₁ e₂ =>
+    pureMentionsVar v e₁ || pureMentionsVar v e₂
+
+/-- Structural syntactic check testing whether variable `v` occurs in a `GuardIR` predicate. -/
+def guardMentionsVar (v : VarId) : GuardIR → Bool
+  | .top | .bot => false
+  | .nonZero e => pureMentionsVar v e
+  | .eq e₁ e₂ => pureMentionsVar v e₁ || pureMentionsVar v e₂
+  | .conj g₁ g₂ | .imp g₁ g₂ =>
+    guardMentionsVar v g₁ || guardMentionsVar v g₂
+
+/-- Constructive non-deterministic single-variable havoc `CFGTransfer` on `Env → Prop`
+    modeling arbitrary writes to `v` (`post` existentially quantifies the new value,
+    `pullback` universally quantifies all `val : Int`, with zero `Classical.choice`). -/
+def havocTransfer (v : VarId) : CFGTransfer (Env → Prop) (Env → Prop) where
+  pullback := fun Q env => ∀ val : Int, Q (updateEnv env v val)
+  post := fun P env' => ∃ env val, updateEnv env v val = env' ∧ P env
+  gc := fun _ _ =>
+    ⟨fun h env hp val => h (updateEnv env v val) ⟨env, val, rfl, hp⟩,
+     fun h _ ⟨env, val, hupd, hp⟩ => hupd ▸ h env hp val⟩
+
+/-- Single-iteration abstract loop-step `CFGTransfer` modeling arbitrary `accVar` body write
+    followed by deterministic `latch` execution. -/
+def loopStepTransfer (accVar : VarId) (latch : Stmt) : CFGTransfer (Env → Prop) (Env → Prop) :=
+  (havocTransfer accVar).comp (stateTransfer (execStmt latch))
+
+/-- Structured imperative `while` loop with preheader `init`, loop guard `cond`,
+    accumulator target `accVar` updated by `body : Expr`, latch `Stmt`, and exit expression `ret`. -/
+structure WhileLoop where
+  init : Stmt
+  cond : GuardIR
+  accVar : VarId
+  body : Expr
+  latch : Stmt
+  ret : Expr
+  deriving DecidableEq, Repr
+
+/-- Top-level loop program IR supporting single loops and preheader-versioned loop branches. -/
+inductive LoopProg where
+  | whileLoop (w : WhileLoop)
+  | iteLoop (g : GuardIR) (thenBr elseBr : LoopProg)
+  deriving DecidableEq, Repr
+
+/-- Fuel-indexed loop evaluation outcome distinguishing completed `Outcome`s from fuel exhaustion. -/
+inductive LoopOutcome where
+  | done (out : Outcome)
+  | outOfFuel
+  deriving DecidableEq, Repr
+
+/-- Fuel-indexed operational step evaluator for `WhileLoop`. -/
+def runWhileSteps : Nat → Env → WhileLoop → LoopOutcome
+  | 0, _, _ => .outOfFuel
+  | fuel + 1, env, w =>
+    if evalGuard env w.cond then
+      match evalExpr env w.body with
+      | .val val => runWhileSteps fuel (execStmt w.latch (updateEnv env w.accVar val)) w
+      | .trap => .done .trap
+      | .ub => .done .ub
+    else
+      .done (evalExpr env w.ret)
+
+/-- Fuel-indexed operational evaluator for `LoopProg`. -/
+def evalLoop : Nat → Env → LoopProg → LoopOutcome
+  | fuel, env, .whileLoop w => runWhileSteps fuel (execStmt w.init env) w
+  | fuel, env, .iteLoop g thenBr elseBr =>
+    if evalGuard env g then evalLoop fuel env thenBr else evalLoop fuel env elseBr
+
+/-- Static count of `.checkedDiv` AST nodes across a `LoopProg`. -/
+def loopCheckedDivCount : LoopProg → Nat
+  | .whileLoop w => checkedDivCount w.body + checkedDivCount w.ret
+  | .iteLoop _ thenBr elseBr => loopCheckedDivCount thenBr + loopCheckedDivCount elseBr
+
+/-- Static count of all division (`.checkedDiv` + `.uncheckedDiv`) AST nodes across a `LoopProg`. -/
+def loopDivOpCount : LoopProg → Nat
+  | .whileLoop w => divOpCount w.body + divOpCount w.ret
+  | .iteLoop _ thenBr elseBr => loopDivOpCount thenBr + loopDivOpCount elseBr
+
+/-- Static count of top-level `.iteLoop` versioned loop branches. -/
+def loopBranchCount : LoopProg → Nat
+  | .whileLoop _ => 0
+  | .iteLoop _ thenBr elseBr => 1 + loopBranchCount thenBr + loopBranchCount elseBr
+
+/-- Dynamic runtime check cost of executing `WhileLoop` steps for `fuel` steps from `env`,
+    short-circuiting identically to `runWhileSteps` on `.trap`/`.ub`. -/
+def runWhileCheckCost : Nat → Env → WhileLoop → Nat
+  | 0, _, _ => 0
+  | fuel + 1, env, w =>
+    guardEvalCost env w.cond +
+      (if evalGuard env w.cond then
+        execCheckCost env w.body +
+          (match evalExpr env w.body with
+           | .val val =>
+             stmtGuardCost (updateEnv env w.accVar val) w.latch +
+               runWhileCheckCost fuel (execStmt w.latch (updateEnv env w.accVar val)) w
+           | _ => 0)
+      else
+        execCheckCost env w.ret)
+
+/-- Total dynamic check cost of executing a `LoopProg` with `fuel` from `env`. -/
+def execLoopCheckCost : Nat → Env → LoopProg → Nat
+  | fuel, env, .whileLoop w =>
+    stmtGuardCost env w.init + runWhileCheckCost fuel (execStmt w.init env) w
+  | fuel, env, .iteLoop g thenBr elseBr =>
+    guardEvalCost env g +
+      (if evalGuard env g then execLoopCheckCost fuel env thenBr else execLoopCheckCost fuel env elseBr)
+
+/-- Parametric counted loop with loop-invariant divisor `d` initialized from `x`:
+    `d := x; while (i != 0) { acc := acc + ((num / d) + ((y * d) / d)); i := i - 1 } return acc`. -/
+def mkCountedDivLoop (x d i acc : VarId) (num y : PureExpr) : WhileLoop :=
+  { init := .assign d (.var x)
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .assign i (.sub (.var i) (.lit 1))
+    ret := .pure (.var acc) }
+
+/-- Parametric two-stage pipeline divisor loop requiring inductive strengthening (`d != 0 /\ nextD != 0`):
+    `d := x; nextD := z; while (i != 0) { acc := acc + ((num / d) + ((y * d) / d)); d := nextD; i := i - 1 } return acc`. -/
+def mkPipelineDivLoop (x z d nextD i acc : VarId) (num y : PureExpr) : WhileLoop :=
+  { init := .seq (.assign d (.var x)) (.assign nextD (.var z))
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .seq (.assign d (.var nextD)) (.assign i (.sub (.var i) (.lit 1)))
+    ret := .pure (.var acc) }
+
+/-- Parametric non-invariant decrementing-divisor loop (`d := x; while (i != 0) { acc := num / d; d := d - 1; i := i - 1 }`):
+    safe on iteration 1 when `x = 1`, traps on iteration 2 when `i = 2`. -/
+def mkDecrementDivisorLoop (x d i acc : VarId) (num : PureExpr) : WhileLoop :=
+  { init := .assign d (.var x)
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .checkedDiv (.pure num) (.pure (.var d))
+    latch := .seq (.assign d (.sub (.var d) (.lit 1))) (.assign i (.sub (.var i) (.lit 1)))
+    ret := .pure (.var acc) }
+
+-- Sanity checks on Milestone 3 TCB loop evaluators, havoc transfers, and cost observers
+example : pureMentionsVar 1 (.add (.lit 3) (.var 1)) = true := rfl
+example : guardMentionsVar 2 (.nonZero (.var 1)) = false := rfl
+example : (havocTransfer 0).pullback (fun env => env 1 = 5) (fun _ => 5) := fun _ => rfl
+example :
+    evalLoop 3 (fun v => if v = 0 then 2 else if v = 2 then 2 else 0)
+      (.whileLoop (mkCountedDivLoop 0 1 2 3 (.lit 8) (.lit 5))) = .done (.val 18) := rfl
+example :
+    execLoopCheckCost 3 (fun v => if v = 0 then 2 else if v = 2 then 2 else 0)
+      (.whileLoop (mkCountedDivLoop 0 1 2 3 (.lit 8) (.lit 5))) = 7 := rfl
+example :
+    evalLoop 3 (fun v => if v = 0 then 1 else if v = 2 then 2 else 0)
+      (.whileLoop (mkDecrementDivisorLoop 0 1 2 3 (.lit 8))) = .done .trap := rfl
+
+/-- Structural syntactic check testing whether `Stmt` contains any `.assign v _` write to `v`. -/
+def stmtWritesVar (v : VarId) : Stmt → Bool
+  | .skip => false
+  | .assign w _ => decide (w = v)
+  | .seq s₁ s₂ => stmtWritesVar v s₁ || stmtWritesVar v s₂
+  | .ite _ thenBr elseBr => stmtWritesVar v thenBr || stmtWritesVar v elseBr
+
+/-- Parametric counted loop whose latch wraps `i := i - 1` in arbitrary surrounding `Stmt` trees
+    `preLatch` and `postLatch`:
+    `d := x; while (i != 0) { acc := acc + ((num / d) + ((y * d) / d)); preLatch; i := i - 1; postLatch } return acc`. -/
+def mkFrameStmtDivLoop (x d i acc : VarId) (num y : PureExpr) (preLatch postLatch : Stmt) : WhileLoop :=
+  { init := .assign d (.var x)
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .seq preLatch (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch)
+    ret := .pure (.var acc) }
+
+/-- Parametric variable-swap divisor loop with arbitrary surrounding latch statements:
+    `d := x; altD := z; while (i != 0) { acc := ... / d ...; preLatch; tmp := d; d := altD; altD := tmp; i := i - 1; postLatch } return acc`. -/
+def mkSwapDivLoop (x z d altD tmp i acc : VarId) (num y : PureExpr)
+    (preLatch postLatch : Stmt) : WhileLoop :=
+  { init := .seq (.assign d (.var x)) (.assign altD (.var z))
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .seq preLatch
+      (.seq (.assign tmp (.var d))
+        (.seq (.assign d (.var altD))
+          (.seq (.assign altD (.var tmp))
+            (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch))))
+    ret := .pure (.var acc) }
+
+/-- Parametric three-stage pipeline divisor loop requiring multi-step inductive strengthening
+    (`d != 0 /\ d1 != 0 /\ d2 != 0`) with arbitrary surrounding latch statements:
+    `d := x; d1 := w; d2 := z; while (i != 0) { acc := ... / d ...; preLatch; d := d1; d1 := d2; i := i - 1; postLatch } return acc`. -/
+def mkPipeline3DivLoop (x w z d d₁ d₂ i acc : VarId) (num y : PureExpr)
+    (preLatch postLatch : Stmt) : WhileLoop :=
+  { init := .seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z)))
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .seq preLatch
+      (.seq (.assign d (.var d₁))
+        (.seq (.assign d₁ (.var d₂))
+          (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch)))
+    ret := .pure (.var acc) }
+
+/-- Parametric branching-latch divisor loop assigning `d := d1` or `d := d2` across `.ite branchCond`
+    with arbitrary surrounding latch statements:
+    `d := x; d1 := w; d2 := z; while (i != 0) { acc := ... / d ...; preLatch; if branchCond { d := d1 } else { d := d2 }; i := i - 1; postLatch } return acc`. -/
+def mkBranchDivLoop (x w z d d₁ d₂ i acc : VarId) (branchCond : GuardIR) (num y : PureExpr)
+    (preLatch postLatch : Stmt) : WhileLoop :=
+  { init := .seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z)))
+    cond := .nonZero (.var i)
+    accVar := acc
+    body := .add (.pure (.var acc)) (mkDualDivExpr num y (.var d))
+    latch := .seq preLatch
+      (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂)))
+        (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch))
+    ret := .pure (.var acc) }
+
+-- Sanity checks on stmtWritesVar and general loop AST builders
+example : stmtWritesVar 0 (.seq .skip (.assign 2 (.lit 7))) = false := rfl
+example : stmtWritesVar 2 (.ite (.nonZero (.var 0)) .skip (.assign 2 (.lit 1))) = true := rfl
+example :
+    evalLoop 3 (fun v => if v = 0 then 2 else if v = 2 then 2 else 0)
+      (.whileLoop (mkFrameStmtDivLoop 0 1 2 3 (.lit 8) (.lit 5) .skip (.assign 4 (.lit 9)))) =
+      .done (.val 18) := rfl
+example :
+    evalLoop 3 (fun v => if v = 0 then 2 else if v = 1 then 4 else if v = 5 then 2 else 0)
+      (.whileLoop (mkSwapDivLoop 0 1 2 3 4 5 6 (.lit 8) (.lit 5) .skip .skip)) =
+      .done (.val 16) := rfl
+example :
+    evalLoop 4 (fun v => if v = 0 then 2 else if v = 1 then 4 else if v = 2 then 8 else if v = 6 then 3 else 0)
+      (.whileLoop (mkPipeline3DivLoop 0 1 2 3 4 5 6 7 (.lit 8) (.lit 5) .skip .skip)) =
+      .done (.val 22) := rfl
+example :
+    evalLoop 3 (fun v => if v = 0 then 2 else if v = 1 then 4 else if v = 2 then 8 else if v = 6 then 2 else 0)
+      (.whileLoop (mkBranchDivLoop 0 1 2 3 4 5 6 7 (.eq (.var 6) (.lit 2)) (.lit 8) (.lit 5) .skip .skip)) =
+      .done (.val 16) := rfl
+
 end CatSem

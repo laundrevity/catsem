@@ -716,6 +716,328 @@
         "optimizeExpr_cancel_div_param"
       ],
       "informal_claim": "For n != 0 and arbitrary p, d, y, env, optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y) prunes the dead branch, cancels division completely (divOpCount = 0), and achieves execBlockCheckCost = 0."
+    },
+    {
+      "id": "havocGuardIR",
+      "status": "spec_locked",
+      "informal_claim": "Computable conservative universal-quantification pullback of a GuardIR predicate across a write to variable v."
+    },
+    {
+      "id": "strengthenLoopInvariantIR",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullbackGuardIR",
+        "havocGuardIR",
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "Computable bounded backward inductive-invariant strengthening across loopStepTransfer (accVar, latch) for target GuardIR."
+    },
+    {
+      "id": "hoistLoopGuardIR",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR"
+      ],
+      "informal_claim": "Computable preheader loop-hoisted guard synthesis across init from ctx to inv."
+    },
+    {
+      "id": "optimizeLoop",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "optimizeBlock",
+        "optimizeExpr"
+      ],
+      "informal_claim": "Computable context-sensitive loop optimizer performing inductive strengthening, preheader guard hoisting / loop versioning, and loop-body check elimination."
+    },
+    {
+      "id": "stateTransfer_iterate_pullback_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "stateTransfer_pullback_apply"
+      ],
+      "informal_claim": "For any step : S -> S, Q : S -> Prop, n : Nat, and s : S, ((stateTransfer step).iterate n).pullback Q s iff Q (step^[n] s)."
+    },
+    {
+      "id": "havocGuardIR_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "havocGuardIR"
+      ],
+      "informal_claim": "denoteGuard (havocGuardIR v g) <= (havocTransfer v).pullback (denoteGuard g)."
+    },
+    {
+      "id": "havocGuardIR_exact_of_nonMention",
+      "status": "spec_locked",
+      "depends_on": [
+        "havocGuardIR"
+      ],
+      "informal_claim": "When guardMentionsVar v g = false, denoteGuard (havocGuardIR v g) = (havocTransfer v).pullback (denoteGuard g)."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_inductive",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "havocGuardIR_sound",
+        "pullbackGuardIR_denote",
+        "synthesizeGuardIR_universal",
+        "isLoopInvariant_iff_le_pullback",
+        "isLoopInvariant_inf"
+      ],
+      "informal_claim": "Whenever strengthenLoopInvariantIR accVar latch target = some inv, IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target)."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_stationary",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "havocGuardIR_exact_of_nonMention"
+      ],
+      "informal_claim": "When d != accVar and d != i, strengthenLoopInvariantIR succeeds on latch i := i - 1 for target .nonZero (.var d)."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_pipeline",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "havocGuardIR_exact_of_nonMention",
+        "pullbackGuardIR_seq"
+      ],
+      "informal_claim": "For distinct pipeline variables (d, nextD, i, accVar), strengthenLoopInvariantIR strengthens .nonZero (.var d) across d := nextD; i := i - 1 to some inductive invariant inv."
+    },
+    {
+      "id": "hoistLoopGuardIR_denote",
+      "status": "spec_locked",
+      "depends_on": [
+        "hoistLoopGuardIR",
+        "synthesizeStmtGuardIR_denote"
+      ],
+      "informal_claim": "denoteGuard (hoistLoopGuardIR init ctx inv) = hoistLoopGuard (stateTransfer (execStmt init)) (denoteGuard ctx) (denoteGuard inv)."
+    },
+    {
+      "id": "hoistLoopGuardIR_iterate_target",
+      "status": "spec_locked",
+      "depends_on": [
+        "hoistLoopGuardIR_denote",
+        "hoistLoopGuard_iterate_target",
+        "forcesAfter_hoistLoopGuard_iterate"
+      ],
+      "informal_claim": "Given IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target), conjoining ctx with hoistLoopGuardIR init ctx inv establishes target across init followed by n loop iterations for every n : Nat."
+    },
+    {
+      "id": "optimizeLoop_guardedEquiv",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_inductive",
+        "hoistLoopGuardIR_iterate_target",
+        "guardedEquiv_hoistLoopGuard_iterate",
+        "stateTransfer_hoistLoopGuard_iterate_equiv",
+        "optimizeExpr_guardedEquiv",
+        "liftEval_guardedEquiv_iff"
+      ],
+      "informal_claim": "For every fuel : Nat, GuardedEquiv (liftEval (evalLoop fuel)) (denoteGuard ctx) (optimizeLoop ctx prog) prog."
+    },
+    {
+      "id": "optimizeLoop_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop_guardedEquiv",
+        "liftEval_guardedEquiv_iff"
+      ],
+      "informal_claim": "For every fuel : Nat, if evalGuard env ctx = true, then evalLoop fuel env (optimizeLoop ctx prog) = evalLoop fuel env prog."
+    },
+    {
+      "id": "optimizeLoop_known_ctx_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_stationary",
+        "hoistLoopGuardIR_denote",
+        "synthesizeStmtGuardIR_assign_self",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under .nonZero (.var x) across n counted iterations of mkCountedDivLoop, optimizeLoop eliminates all checked divisions and loop branches and reduces execLoopCheckCost from 3 * n + 1 to n + 1."
+    },
+    {
+      "id": "optimizeLoop_unknown_ctx_hoist_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_stationary",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under .top when env x != 0 across n counted iterations of mkCountedDivLoop, optimizeLoop hoists the divisor check to the preheader, reducing execLoopCheckCost from 3 * n + 1 to at most n + 2."
+    },
+    {
+      "id": "optimizeLoop_zero_div_behavior_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop_sound"
+      ],
+      "informal_claim": "Under .top when x = 0, optimizeLoop .top on mkCountedDivLoop returns .done (.val (env0 acc)) on 0 iterations (i = 0) and .done .trap when i = n + 1."
+    },
+    {
+      "id": "optimizeLoop_pipeline_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_pipeline",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under x != 0 and z != 0 across n iterations of mkPipelineDivLoop, optimizeLoop strengthens d != 0 to d != 0 and nextD != 0, eliminates checked divisions and loop branches, and achieves execLoopCheckCost = n + 1."
+    },
+    {
+      "id": "optimizeLoop_decrement_div_trap_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop_sound",
+        "stateTransfer_isLoopInvariant_iff"
+      ],
+      "informal_claim": "On mkDecrementDivisorLoop with x = 1 and i = 2 under .nonZero (.var x), optimizeLoop preserves .done .trap on iteration 2."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_stationary_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_exact_of_nonMention",
+        "synthesizeStmtGuardIR_assign_self"
+      ],
+      "informal_claim": "For arbitrary stepRhs : PureExpr with d != accVar and d != i, strengthenLoopInvariantIR on i := stepRhs for .nonZero (.var d) returns some inv covering all env with env d != 0 and discharging hoistLoopGuardIR across d := x under .nonZero (.var x) to .top."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_pipeline_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_exact_of_nonMention",
+        "pullbackGuardIR_seq",
+        "synthesizeGuardIR_discharge_conj_left",
+        "synthesizeGuardIR_discharge_conj_right"
+      ],
+      "informal_claim": "For arbitrary stepRhs : PureExpr and distinct pipeline variables, strengthenLoopInvariantIR on d := nextD; i := stepRhs for .nonZero (.var d) returns some inv covering all env with env d != 0 and env nextD != 0 and discharging hoistLoopGuardIR across d := x; nextD := z under x != 0 and z != 0 to .top."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_step_complete",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "havocGuardIR",
+        "pullbackGuardIR",
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "For arbitrary accVar, latch, and target, if cand := GuardIR.conj target (havocGuardIR accVar (pullbackGuardIR latch target)) closes in one step under synthesizeGuardIR, strengthenLoopInvariantIR succeeds with some inv covering target and g1."
+    },
+    {
+      "id": "havocGuardIR_nonMention_eq",
+      "status": "spec_locked",
+      "depends_on": [
+        "havocGuardIR"
+      ],
+      "informal_claim": "When guardMentionsVar v g = false, havocGuardIR v g = g syntactically without injecting unnormalized wrapper constructors."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_frame_stmt_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_nonMention_eq",
+        "pullbackGuardIR_denote",
+        "synthesizeStmtGuardIR_assign_self"
+      ],
+      "informal_claim": "For any latch : Stmt with stmtWritesVar d latch = false and stmtWritesVar accVar latch = false (d != accVar), strengthenLoopInvariantIR returns some inv covering all env with env d != 0 and discharging hoistLoopGuardIR across d := x under .nonZero (.var x) to .top."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_swap_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_nonMention_eq",
+        "pullbackGuardIR_seq",
+        "synthesizeGuardIR_discharge_conj_left",
+        "synthesizeGuardIR_discharge_conj_right"
+      ],
+      "informal_claim": "Across preLatch; tmp := d; d := altD; altD := tmp; postLatch with arbitrary frame-preserving surrounding Stmt trees, strengthenLoopInvariantIR returns some inv covering env d != 0 and env altD != 0 and discharging hoistLoopGuardIR across d := x; altD := z under x != 0 and z != 0 to .top."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_pipeline3_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_nonMention_eq",
+        "pullbackGuardIR_seq",
+        "isLoopInvariant_inf",
+        "synthesizeGuardIR_discharge_conj_left",
+        "synthesizeGuardIR_discharge_conj_right"
+      ],
+      "informal_claim": "Across preLatch; d := d1; d1 := d2; postLatch with arbitrary frame-preserving surrounding Stmt trees, multi-step strengthenLoopInvariantIR returns some inv covering env d != 0, env d1 != 0, and env d2 != 0 and discharging hoistLoopGuardIR across d := x; d1 := w; d2 := z under x != 0, w != 0, and z != 0 to .top."
+    },
+    {
+      "id": "strengthenLoopInvariantIR_ite_branch_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "strengthenLoopInvariantIR",
+        "hoistLoopGuardIR",
+        "havocGuardIR_nonMention_eq",
+        "pullbackGuardIR_denote",
+        "synthesizeGuardIR_discharge_conj_left",
+        "synthesizeGuardIR_discharge_conj_right"
+      ],
+      "informal_claim": "Across preLatch; if branchCond { d := d1 } else { d := d2 }; postLatch for arbitrary branchCond : GuardIR and frame-preserving surrounding Stmt trees, strengthenLoopInvariantIR returns some inv covering env d != 0, env d1 != 0, and env d2 != 0 and discharging hoistLoopGuardIR across d := x; d1 := w; d2 := z to .top."
+    },
+    {
+      "id": "optimizeLoop_frame_stmt_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_frame_stmt_safe",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under .nonZero (.var x) across n counted iterations of mkFrameStmtDivLoop with arbitrary frame-preserving preLatch and postLatch, optimizeLoop eliminates all checked divisions and loop branches and saves at least 2 * n runtime checks."
+    },
+    {
+      "id": "optimizeLoop_swap_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_swap_safe",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under x != 0 and z != 0 across n counted iterations of mkSwapDivLoop with arbitrary frame-preserving preLatch and postLatch, optimizeLoop eliminates all checked divisions and loop branches and saves at least 2 * n runtime checks."
+    },
+    {
+      "id": "optimizeLoop_pipeline3_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_pipeline3_safe",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under x != 0, w != 0, and z != 0 across n counted iterations of mkPipeline3DivLoop with arbitrary frame-preserving preLatch and postLatch, optimizeLoop eliminates all checked divisions and loop branches and saves at least 2 * n runtime checks."
+    },
+    {
+      "id": "optimizeLoop_ite_branch_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeLoop",
+        "strengthenLoopInvariantIR_ite_branch_safe",
+        "hoistLoopGuardIR_denote",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "Under x != 0, w != 0, and z != 0 across n counted iterations of mkBranchDivLoop for arbitrary branchCond : GuardIR and frame-preserving preLatch and postLatch, optimizeLoop eliminates all checked divisions and loop branches and saves at least 2 * n runtime checks."
     }
   ]
 }

@@ -61,6 +61,25 @@ elab "#verify_allowed_axioms " id:ident : command => do
 #verify_allowed_axioms CatSem.mkClobberBlock
 #verify_allowed_axioms CatSem.mkDiamondSafeBlock
 #verify_allowed_axioms CatSem.mkDeadBranchBlock
+#verify_allowed_axioms CatSem.pureMentionsVar
+#verify_allowed_axioms CatSem.guardMentionsVar
+#verify_allowed_axioms CatSem.havocTransfer
+#verify_allowed_axioms CatSem.loopStepTransfer
+#verify_allowed_axioms CatSem.runWhileSteps
+#verify_allowed_axioms CatSem.evalLoop
+#verify_allowed_axioms CatSem.loopCheckedDivCount
+#verify_allowed_axioms CatSem.loopDivOpCount
+#verify_allowed_axioms CatSem.loopBranchCount
+#verify_allowed_axioms CatSem.runWhileCheckCost
+#verify_allowed_axioms CatSem.execLoopCheckCost
+#verify_allowed_axioms CatSem.mkCountedDivLoop
+#verify_allowed_axioms CatSem.mkPipelineDivLoop
+#verify_allowed_axioms CatSem.mkDecrementDivisorLoop
+#verify_allowed_axioms CatSem.stmtWritesVar
+#verify_allowed_axioms CatSem.mkFrameStmtDivLoop
+#verify_allowed_axioms CatSem.mkSwapDivLoop
+#verify_allowed_axioms CatSem.mkPipeline3DivLoop
+#verify_allowed_axioms CatSem.mkBranchDivLoop
 
 -- Fails to compile if Proofs/Submission.lean altered any theorem name or signature
 example {α : Type*} [HeytingAlgebra α] (a b : α) :
@@ -548,6 +567,371 @@ example (p : CatSem.PureExpr) (d : CatSem.VarId) (n : Int) (hn : n ≠ 0)
       CatSem.execBlockCheckCost env (CatSem.optimizeBlock (.nonZero p) (CatSem.mkDeadBranchBlock p d n y)) = 0 :=
   CatSem.optimizeBlock_dead_branch_elim_param p d n hn y env
 
+-- Milestone 3 computability & signature checks (rejects `noncomputable` implementations)
+def _computable_havocGuardIR : VarId → GuardIR → GuardIR :=
+  CatSem.havocGuardIR
+
+def _computable_strengthenLoopInvariantIR : VarId → Stmt → GuardIR → Option GuardIR :=
+  CatSem.strengthenLoopInvariantIR
+
+def _computable_hoistLoopGuardIR : Stmt → GuardIR → GuardIR → GuardIR :=
+  CatSem.hoistLoopGuardIR
+
+def _computable_optimizeLoop : GuardIR → LoopProg → LoopProg :=
+  CatSem.optimizeLoop
+
+example {S : Type*} (step : S → S) (Q : S → Prop) (n : ℕ) (s : S) :
+    ((CatSem.stateTransfer step).iterate n).pullback Q s ↔ Q (step^[n] s) :=
+  CatSem.stateTransfer_iterate_pullback_iff step Q n s
+
+example (v : CatSem.VarId) (g : CatSem.GuardIR) :
+    CatSem.denoteGuard (CatSem.havocGuardIR v g) ≤
+      (CatSem.havocTransfer v).pullback (CatSem.denoteGuard g) :=
+  CatSem.havocGuardIR_sound v g
+
+example (v : CatSem.VarId) (g : CatSem.GuardIR)
+    (h : CatSem.guardMentionsVar v g = false) :
+    CatSem.denoteGuard (CatSem.havocGuardIR v g) =
+      (CatSem.havocTransfer v).pullback (CatSem.denoteGuard g) :=
+  CatSem.havocGuardIR_exact_of_nonMention v g h
+
+example (accVar : CatSem.VarId) (latch : CatSem.Stmt)
+    (target inv : CatSem.GuardIR)
+    (h : CatSem.strengthenLoopInvariantIR accVar latch target = some inv) :
+    CatSem.IsInductiveFor (CatSem.loopStepTransfer accVar latch)
+      (CatSem.denoteGuard inv) (CatSem.denoteGuard target) :=
+  CatSem.strengthenLoopInvariantIR_inductive accVar latch target inv h
+
+example (accVar d i : CatSem.VarId) (hda : d ≠ accVar) (hdi : d ≠ i) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.assign i (.sub (.var i) (.lit 1))) (.nonZero (.var d)) = some inv :=
+  CatSem.strengthenLoopInvariantIR_stationary accVar d i hda hdi
+
+example (accVar d nextD i : CatSem.VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i (.sub (.var i) (.lit 1))))
+        (.nonZero (.var d)) = some inv :=
+  CatSem.strengthenLoopInvariantIR_pipeline accVar d nextD i hda hna hdi hni hdn
+
+example (init : CatSem.Stmt) (ctx inv : CatSem.GuardIR) :
+    CatSem.denoteGuard (CatSem.hoistLoopGuardIR init ctx inv) =
+      CatSem.hoistLoopGuard (CatSem.stateTransfer (CatSem.execStmt init))
+        (CatSem.denoteGuard ctx) (CatSem.denoteGuard inv) :=
+  CatSem.hoistLoopGuardIR_denote init ctx inv
+
+example (init : CatSem.Stmt) (accVar : CatSem.VarId) (latch : CatSem.Stmt)
+    (ctx target inv : CatSem.GuardIR)
+    (hInd : CatSem.IsInductiveFor (CatSem.loopStepTransfer accVar latch)
+      (CatSem.denoteGuard inv) (CatSem.denoteGuard target))
+    (n : ℕ) :
+    (((CatSem.stateTransfer (CatSem.execStmt init)).comp
+      ((CatSem.loopStepTransfer accVar latch).iterate n)).post
+      (CatSem.denoteGuard ctx ⊓ CatSem.denoteGuard (CatSem.hoistLoopGuardIR init ctx inv))) ≤
+      CatSem.denoteGuard target :=
+  CatSem.hoistLoopGuardIR_iterate_target init accVar latch ctx target inv hInd n
+
+example (fuel : Nat) (ctx : CatSem.GuardIR) (prog : CatSem.LoopProg) :
+    CatSem.GuardedEquiv (CatSem.liftEval (CatSem.evalLoop fuel)) (CatSem.denoteGuard ctx)
+      (CatSem.optimizeLoop ctx prog) prog :=
+  CatSem.optimizeLoop_guardedEquiv fuel ctx prog
+
+example (fuel : Nat) (ctx : CatSem.GuardIR) (prog : CatSem.LoopProg) (env : CatSem.Env) :
+    CatSem.evalGuard env ctx = true →
+      CatSem.evalLoop fuel env (CatSem.optimizeLoop ctx prog) = CatSem.evalLoop fuel env prog :=
+  CatSem.optimizeLoop_sound fuel ctx prog env
+
+example (x d i acc : CatSem.VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : CatSem.PureExpr) (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n) (hx : CatSem.evalGuard env (.nonZero (.var x)) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkCountedDivLoop x d i acc num y)
+    let opt := CatSem.optimizeLoop (.nonZero (.var x)) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt = n + 1 ∧
+      CatSem.execLoopCheckCost (n + 1) env src = 3 * n + 1 :=
+  CatSem.optimizeLoop_known_ctx_elim_param x d i acc hid hia hda num y n env hi hx
+
+example (x d i acc : CatSem.VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : CatSem.PureExpr) (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n) (hx : env x ≠ 0) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkCountedDivLoop x d i acc num y)
+    let opt := CatSem.optimizeLoop .top src
+    CatSem.execLoopCheckCost (n + 1) env opt ≤ n + 2 ∧
+      CatSem.execLoopCheckCost (n + 1) env src = 3 * n + 1 :=
+  CatSem.optimizeLoop_unknown_ctx_hoist_param x d i acc hid hia hda num y n env hi hx
+
+example (x d i acc : CatSem.VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : CatSem.PureExpr) (n : Nat) (env₀ env₁ : CatSem.Env)
+    (hx₀ : env₀ x = 0) (hi₀ : env₀ i = 0)
+    (hx₁ : env₁ x = 0) (hi₁ : env₁ i = Int.ofNat (n + 1)) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkCountedDivLoop x d i acc num y)
+    CatSem.evalLoop 1 env₀ (CatSem.optimizeLoop .top src) = .done (.val (env₀ acc)) ∧
+      CatSem.evalLoop (n + 2) env₁ (CatSem.optimizeLoop .top src) = .done .trap :=
+  CatSem.optimizeLoop_zero_div_behavior_param x d i acc hid hia hda num y n env₀ env₁ hx₀ hi₀ hx₁ hi₁
+
+example (x z d nextD i acc : CatSem.VarId)
+    (hda : d ≠ acc) (hna : nextD ≠ acc)
+    (hid : i ≠ d) (hin : i ≠ nextD) (hia : i ≠ acc) (hdn : d ≠ nextD)
+    (num y : CatSem.PureExpr) (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : CatSem.evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkPipelineDivLoop x z d nextD i acc num y)
+    let opt := CatSem.optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt = n + 1 :=
+  CatSem.optimizeLoop_pipeline_elim_param x z d nextD i acc hda hna hid hin hia hdn num y n env hi hctx
+
+example (x d i acc : CatSem.VarId)
+    (hda : d ≠ acc) (hia : i ≠ acc) (hid : i ≠ d)
+    (num : CatSem.PureExpr) (env : CatSem.Env) (hx : env x = 1) (hi : env i = 2) :
+    CatSem.evalLoop 3 env
+      (CatSem.optimizeLoop (.nonZero (.var x))
+        (.whileLoop (CatSem.mkDecrementDivisorLoop x d i acc num))) = .done .trap :=
+  CatSem.optimizeLoop_decrement_div_trap_param x d i acc hda hia hid num env hx hi
+
+example (accVar d i : CatSem.VarId)
+    (hda : d ≠ accVar) (hdi : d ≠ i) (stepRhs : CatSem.PureExpr) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar (.assign i stepRhs) (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x : CatSem.VarId,
+        CatSem.hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_stationary_safe accVar d i hda hdi stepRhs
+
+example (accVar d nextD i : CatSem.VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) (stepRhs : CatSem.PureExpr) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → env nextD ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x z : CatSem.VarId,
+        CatSem.hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign nextD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_pipeline_safe accVar d nextD i hda hna hdi hni hdn stepRhs
+
+example (accVar : CatSem.VarId) (latch : CatSem.Stmt) (target : CatSem.GuardIR) :
+    let g₁ := CatSem.havocGuardIR accVar (CatSem.pullbackGuardIR latch target)
+    let cand := CatSem.GuardIR.conj target g₁
+    CatSem.synthesizeGuardIR cand (CatSem.havocGuardIR accVar (CatSem.pullbackGuardIR latch cand)) = .top →
+      ∃ inv,
+        CatSem.strengthenLoopInvariantIR accVar latch target = some inv ∧
+        (∀ env : CatSem.Env,
+          CatSem.evalGuard env target = true →
+          CatSem.evalGuard env g₁ = true →
+          CatSem.evalGuard env inv = true) :=
+  CatSem.strengthenLoopInvariantIR_step_complete accVar latch target
+
+example (v : CatSem.VarId) (g : CatSem.GuardIR)
+    (h : CatSem.guardMentionsVar v g = false) :
+    CatSem.havocGuardIR v g = g :=
+  CatSem.havocGuardIR_nonMention_eq v g h
+
+example (accVar d : CatSem.VarId) (latch : CatSem.Stmt)
+    (hda : d ≠ accVar)
+    (hdWrite : CatSem.stmtWritesVar d latch = false)
+    (haWrite : CatSem.stmtWritesVar accVar latch = false) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar latch (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x : CatSem.VarId,
+        CatSem.hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_frame_stmt_safe accVar d latch hda hdWrite haWrite
+
+example (accVar d altD tmp : CatSem.VarId)
+    (preLatch postLatch : CatSem.Stmt)
+    (hda : d ≠ accVar) (hala : altD ≠ accVar) (hta : tmp ≠ accVar)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreAlt : CatSem.stmtWritesVar altD preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar accVar preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostAlt : CatSem.stmtWritesVar altD postLatch = false)
+    (hPostTmp : CatSem.stmtWritesVar tmp postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign tmp (.var d))
+            (.seq (.assign d (.var altD))
+              (.seq (.assign altD (.var tmp)) postLatch))))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → env altD ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x z : CatSem.VarId,
+        CatSem.hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign altD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_swap_safe accVar d altD tmp preLatch postLatch
+    hda hala hta hdal hdt halt hPreD hPreAlt hPreAcc hPostD hPostAlt hPostTmp hPostAcc
+
+example (accVar d d₁ d₂ : CatSem.VarId)
+    (preLatch postLatch : CatSem.Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreD₁ : CatSem.stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : CatSem.stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar accVar preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostD₁ : CatSem.stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : CatSem.stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign d (.var d₁))
+            (.seq (.assign d₁ (.var d₂)) postLatch)))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x w z : CatSem.VarId,
+        CatSem.hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_pipeline3_safe accVar d d₁ d₂ preLatch postLatch
+    hda hd₁a hd₂a hdd₁ hdd₂ hd₁d₂ hPreD hPreD₁ hPreD₂ hPreAcc hPostD hPostD₁ hPostD₂ hPostAcc
+
+example (accVar d d₁ d₂ : CatSem.VarId)
+    (branchCond : CatSem.GuardIR) (preLatch postLatch : CatSem.Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreD₁ : CatSem.stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : CatSem.stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar accVar preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostD₁ : CatSem.stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : CatSem.stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      CatSem.strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : CatSem.Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → CatSem.evalGuard env inv = true) ∧
+      (∀ x w z : CatSem.VarId,
+        CatSem.hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) :=
+  CatSem.strengthenLoopInvariantIR_ite_branch_safe accVar d d₁ d₂ branchCond preLatch postLatch
+    hda hd₁a hd₂a hdd₁ hdd₂ hd₁d₂ hPreD hPreD₁ hPreD₂ hPreAcc hPostD hPostD₁ hPostD₂ hPostAcc
+
+example (x d i acc : CatSem.VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : CatSem.PureExpr) (preLatch postLatch : CatSem.Stmt)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreI : CatSem.stmtWritesVar i preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar acc preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostI : CatSem.stmtWritesVar i postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n)
+    (hx : CatSem.evalGuard env (.nonZero (.var x)) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkFrameStmtDivLoop x d i acc num y preLatch postLatch)
+    let opt := CatSem.optimizeLoop (.nonZero (.var x)) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt + 2 * n ≤ CatSem.execLoopCheckCost (n + 1) env src :=
+  CatSem.optimizeLoop_frame_stmt_elim_param x d i acc hid hia hda num y preLatch postLatch
+    hPreD hPreI hPreAcc hPostD hPostI hPostAcc n env hi hx
+
+example (x z d altD tmp i acc : CatSem.VarId)
+    (hda : d ≠ acc) (hala : altD ≠ acc) (hta : tmp ≠ acc)
+    (hid : i ≠ d) (hial : i ≠ altD) (hit : i ≠ tmp) (hia : i ≠ acc)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (num y : CatSem.PureExpr) (preLatch postLatch : CatSem.Stmt)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreAlt : CatSem.stmtWritesVar altD preLatch = false)
+    (hPreI : CatSem.stmtWritesVar i preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar acc preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostAlt : CatSem.stmtWritesVar altD postLatch = false)
+    (hPostTmp : CatSem.stmtWritesVar tmp postLatch = false)
+    (hPostI : CatSem.stmtWritesVar i postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : CatSem.evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkSwapDivLoop x z d altD tmp i acc num y preLatch postLatch)
+    let opt := CatSem.optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt + 2 * n ≤ CatSem.execLoopCheckCost (n + 1) env src :=
+  CatSem.optimizeLoop_swap_elim_param x z d altD tmp i acc hda hala hta hid hial hit hia hdal hdt halt
+    num y preLatch postLatch hPreD hPreAlt hPreI hPreAcc hPostD hPostAlt hPostTmp hPostI hPostAcc n env hi hctx
+
+example (x w z d d₁ d₂ i acc : CatSem.VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (num y : CatSem.PureExpr) (preLatch postLatch : CatSem.Stmt)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreD₁ : CatSem.stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : CatSem.stmtWritesVar d₂ preLatch = false)
+    (hPreI : CatSem.stmtWritesVar i preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar acc preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostD₁ : CatSem.stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : CatSem.stmtWritesVar d₂ postLatch = false)
+    (hPostI : CatSem.stmtWritesVar i postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : CatSem.evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkPipeline3DivLoop x w z d d₁ d₂ i acc num y preLatch postLatch)
+    let opt := CatSem.optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt + 2 * n ≤ CatSem.execLoopCheckCost (n + 1) env src :=
+  CatSem.optimizeLoop_pipeline3_elim_param x w z d d₁ d₂ i acc hda hd₁a hd₂a hid hid₁ hid₂ hia hdd₁ hdd₂ hd₁d₂
+    num y preLatch postLatch hPreD hPreD₁ hPreD₂ hPreI hPreAcc hPostD hPostD₁ hPostD₂ hPostI hPostAcc n env hi hctx
+
+example (x w z d d₁ d₂ i acc : CatSem.VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (branchCond : CatSem.GuardIR) (num y : CatSem.PureExpr) (preLatch postLatch : CatSem.Stmt)
+    (hPreD : CatSem.stmtWritesVar d preLatch = false)
+    (hPreD₁ : CatSem.stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : CatSem.stmtWritesVar d₂ preLatch = false)
+    (hPreI : CatSem.stmtWritesVar i preLatch = false)
+    (hPreAcc : CatSem.stmtWritesVar acc preLatch = false)
+    (hPostD : CatSem.stmtWritesVar d postLatch = false)
+    (hPostD₁ : CatSem.stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : CatSem.stmtWritesVar d₂ postLatch = false)
+    (hPostI : CatSem.stmtWritesVar i postLatch = false)
+    (hPostAcc : CatSem.stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : CatSem.Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : CatSem.evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := CatSem.LoopProg.whileLoop (CatSem.mkBranchDivLoop x w z d d₁ d₂ i acc branchCond num y preLatch postLatch)
+    let opt := CatSem.optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    CatSem.loopCheckedDivCount opt = 0 ∧
+      CatSem.loopDivOpCount opt ≤ 1 ∧
+      CatSem.loopBranchCount opt = 0 ∧
+      CatSem.execLoopCheckCost (n + 1) env opt + 2 * n ≤ CatSem.execLoopCheckCost (n + 1) env src :=
+  CatSem.optimizeLoop_ite_branch_elim_param x w z d d₁ d₂ i acc hda hd₁a hd₂a hid hid₁ hid₂ hia hdd₁ hdd₂ hd₁d₂
+    branchCond num y preLatch postLatch hPreD hPreD₁ hPreD₂ hPreI hPreAcc hPostD hPostD₁ hPostD₂ hPostI hPostAcc n env hi hctx
+
 #print axioms CatSem.synthesizeGuard
 #print axioms CatSem.synthesizeEdgeGuard
 #print axioms CatSem.CFGTransfer.id
@@ -587,11 +971,34 @@ example (p : CatSem.PureExpr) (d : CatSem.VarId) (n : Int) (hn : n ≠ 0)
 #print axioms CatSem.mkClobberBlock
 #print axioms CatSem.mkDiamondSafeBlock
 #print axioms CatSem.mkDeadBranchBlock
+#print axioms CatSem.pureMentionsVar
+#print axioms CatSem.guardMentionsVar
+#print axioms CatSem.havocTransfer
+#print axioms CatSem.loopStepTransfer
+#print axioms CatSem.runWhileSteps
+#print axioms CatSem.evalLoop
+#print axioms CatSem.loopCheckedDivCount
+#print axioms CatSem.loopDivOpCount
+#print axioms CatSem.loopBranchCount
+#print axioms CatSem.runWhileCheckCost
+#print axioms CatSem.execLoopCheckCost
+#print axioms CatSem.mkCountedDivLoop
+#print axioms CatSem.mkPipelineDivLoop
+#print axioms CatSem.mkDecrementDivisorLoop
+#print axioms CatSem.stmtWritesVar
+#print axioms CatSem.mkFrameStmtDivLoop
+#print axioms CatSem.mkSwapDivLoop
+#print axioms CatSem.mkPipeline3DivLoop
+#print axioms CatSem.mkBranchDivLoop
 #print axioms CatSem.synthesizeGuardIR
 #print axioms CatSem.optimizeExpr
 #print axioms CatSem.pullbackGuardIR
 #print axioms CatSem.synthesizeStmtGuardIR
 #print axioms CatSem.optimizeBlock
+#print axioms CatSem.havocGuardIR
+#print axioms CatSem.strengthenLoopInvariantIR
+#print axioms CatSem.hoistLoopGuardIR
+#print axioms CatSem.optimizeLoop
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -674,13 +1081,44 @@ example (p : CatSem.PureExpr) (d : CatSem.VarId) (n : Int) (hn : n ≠ 0)
 #print axioms CatSem.optimizeBlock_clobber_trap_param
 #print axioms CatSem.optimizeBlock_diamond_elim_param
 #print axioms CatSem.optimizeBlock_dead_branch_elim_param
+#print axioms CatSem.stateTransfer_iterate_pullback_iff
+#print axioms CatSem.havocGuardIR_sound
+#print axioms CatSem.havocGuardIR_exact_of_nonMention
+#print axioms CatSem.strengthenLoopInvariantIR_inductive
+#print axioms CatSem.strengthenLoopInvariantIR_stationary
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline
+#print axioms CatSem.hoistLoopGuardIR_denote
+#print axioms CatSem.hoistLoopGuardIR_iterate_target
+#print axioms CatSem.optimizeLoop_guardedEquiv
+#print axioms CatSem.optimizeLoop_sound
+#print axioms CatSem.optimizeLoop_known_ctx_elim_param
+#print axioms CatSem.optimizeLoop_unknown_ctx_hoist_param
+#print axioms CatSem.optimizeLoop_zero_div_behavior_param
+#print axioms CatSem.optimizeLoop_pipeline_elim_param
+#print axioms CatSem.optimizeLoop_decrement_div_trap_param
+#print axioms CatSem.strengthenLoopInvariantIR_stationary_safe
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline_safe
+#print axioms CatSem.strengthenLoopInvariantIR_step_complete
+#print axioms CatSem.havocGuardIR_nonMention_eq
+#print axioms CatSem.strengthenLoopInvariantIR_frame_stmt_safe
+#print axioms CatSem.strengthenLoopInvariantIR_swap_safe
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline3_safe
+#print axioms CatSem.strengthenLoopInvariantIR_ite_branch_safe
+#print axioms CatSem.optimizeLoop_frame_stmt_elim_param
+#print axioms CatSem.optimizeLoop_swap_elim_param
+#print axioms CatSem.optimizeLoop_pipeline3_elim_param
+#print axioms CatSem.optimizeLoop_ite_branch_elim_param
 
--- In-kernel transitive axiom allowlist audit on compiler passes and all Rounds 1–11 + Milestones 1–2 theorems
+-- In-kernel transitive axiom allowlist audit on compiler passes and all Rounds 1–11 + Milestones 1–3 theorems
 #verify_allowed_axioms CatSem.synthesizeGuardIR
 #verify_allowed_axioms CatSem.optimizeExpr
 #verify_allowed_axioms CatSem.pullbackGuardIR
 #verify_allowed_axioms CatSem.synthesizeStmtGuardIR
 #verify_allowed_axioms CatSem.optimizeBlock
+#verify_allowed_axioms CatSem.havocGuardIR
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR
+#verify_allowed_axioms CatSem.hoistLoopGuardIR
+#verify_allowed_axioms CatSem.optimizeLoop
 #verify_allowed_axioms CatSem.synthesizeGuard_sound
 #verify_allowed_axioms CatSem.synthesizeGuard_weakest
 #verify_allowed_axioms CatSem.synthesizeGuard_adjunction
@@ -763,5 +1201,32 @@ example (p : CatSem.PureExpr) (d : CatSem.VarId) (n : Int) (hn : n ≠ 0)
 #verify_allowed_axioms CatSem.optimizeBlock_clobber_trap_param
 #verify_allowed_axioms CatSem.optimizeBlock_diamond_elim_param
 #verify_allowed_axioms CatSem.optimizeBlock_dead_branch_elim_param
+#verify_allowed_axioms CatSem.stateTransfer_iterate_pullback_iff
+#verify_allowed_axioms CatSem.havocGuardIR_sound
+#verify_allowed_axioms CatSem.havocGuardIR_exact_of_nonMention
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_inductive
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_stationary
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_pipeline
+#verify_allowed_axioms CatSem.hoistLoopGuardIR_denote
+#verify_allowed_axioms CatSem.hoistLoopGuardIR_iterate_target
+#verify_allowed_axioms CatSem.optimizeLoop_guardedEquiv
+#verify_allowed_axioms CatSem.optimizeLoop_sound
+#verify_allowed_axioms CatSem.optimizeLoop_known_ctx_elim_param
+#verify_allowed_axioms CatSem.optimizeLoop_unknown_ctx_hoist_param
+#verify_allowed_axioms CatSem.optimizeLoop_zero_div_behavior_param
+#verify_allowed_axioms CatSem.optimizeLoop_pipeline_elim_param
+#verify_allowed_axioms CatSem.optimizeLoop_decrement_div_trap_param
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_stationary_safe
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_pipeline_safe
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_step_complete
+#verify_allowed_axioms CatSem.havocGuardIR_nonMention_eq
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_frame_stmt_safe
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_swap_safe
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_pipeline3_safe
+#verify_allowed_axioms CatSem.strengthenLoopInvariantIR_ite_branch_safe
+#verify_allowed_axioms CatSem.optimizeLoop_frame_stmt_elim_param
+#verify_allowed_axioms CatSem.optimizeLoop_swap_elim_param
+#verify_allowed_axioms CatSem.optimizeLoop_pipeline3_elim_param
+#verify_allowed_axioms CatSem.optimizeLoop_ite_branch_elim_param
 
 end CatSem.Verify

@@ -759,3 +759,475 @@ end CatSem.PostImplAudit.M2
 #print axioms CatSem.PostImplAudit.M2.pullback_semantic_sweep
 #print axioms CatSem.PostImplAudit.M2.synthesis_semantic_sweep
 #print axioms CatSem.PostImplAudit.M2.block_semantic_sweep
+
+/-!
+Milestone 3 Gate 2 implementation audit for submission
+ba5aeefca9f932707e8e24ca27029ce2717882a48ab2dc68f1b13103528fc5bf.
+The preceding Milestone 1 and Milestone 2 audits are retained unchanged.
+Every computation below uses the submitted public compiler and the independent
+operational evaluator; no target stubs or custom elaborator syntax are used.
+-/
+namespace CatSem.PostImplAudit.M3
+
+def nzAt (v : VarId) : GuardIR := .nonZero (.var v)
+def counted : WhileLoop := mkCountedDivLoop 0 1 2 3 (.lit 8) (.lit 5)
+def versionBodyChecks : LoopProg → Option (Nat × Nat)
+  | .iteLoop _ (.whileLoop t) (.whileLoop f) => some (checkedDivCount t.body, checkedDivCount f.body)
+  | _ => none
+def versionGuard : LoopProg → Option GuardIR
+  | .iteLoop g _ _ => some g
+  | _ => none
+def invariantAt (acc : VarId) (s : Stmt) (target : GuardIR) (rho : Env) : Bool :=
+  match strengthenLoopInvariantIR acc s target with
+  | some inv => evalGuard rho inv
+  | none => false
+
+def mixedLoop : WhileLoop :=
+  {init := .skip, cond := nzAt 2, accVar := 3,
+   body := .add (.checkedDiv (lit 8) (v 0)) (.checkedDiv (lit 9) (v 1)),
+   latch := .assign 2 (.sub (.var 2) (.lit 1)), ret := v 3}
+def accumulatorLoop : WhileLoop :=
+  {init := .skip, cond := nzAt 2, accVar := 3,
+   body := .checkedDiv (lit 1) (v 3),
+   latch := .assign 2 (.sub (.var 2) (.lit 1)), ret := v 3}
+def copiedAccumulatorLoop : WhileLoop :=
+  {init := .skip, cond := nzAt 2, accVar := 3,
+   body := .checkedDiv (lit 1) (v 0),
+   latch := .seq (.assign 0 (.var 3)) (.assign 2 (.sub (.var 2) (.lit 1))), ret := v 3}
+def counterDivisionLoop : WhileLoop :=
+  {init := .skip, cond := nzAt 2, accVar := 3,
+   body := .add (v 3) (.checkedDiv (lit 8) (v 2)),
+   latch := .assign 2 (.sub (.var 2) (.lit 1)), ret := v 3}
+def checkedExit : WhileLoop := {counterDivisionLoop with ret := .checkedDiv (lit 1) (v 2)}
+
+def chainMoves (start : Nat) : Nat → Stmt
+  | 0 => .skip
+  | edges + 1 => .seq (.assign start (.var (start + 1))) (chainMoves (start + 1) edges)
+def chainLoop (stages : Nat) : WhileLoop :=
+  {init := .skip, cond := nzAt 20, accVar := 21,
+   body := .add (v 21) (.checkedDiv (lit 12) (v 0)),
+   latch := .seq (chainMoves 0 (stages - 1)) (.assign 20 (.sub (.var 20) (.lit 1))), ret := v 21}
+def nzRange (start : Nat) : Nat → GuardIR
+  | 0 => .top
+  | count + 1 => .conj (nzAt start) (nzRange (start + 1) count)
+def chainEnv (last count : Int) : Env :=
+  fun j => if j = 0 then 2 else if j = 1 then 3 else if j = 2 then 4
+    else if j = 3 then 6 else if j = 4 then last else if j = 20 then count
+    else if j = 21 then 0 else 1
+
+def stableBranch : Stmt := .ite (nzAt 7) (.assign 0 (.var 1)) (.assign 0 (.var 4))
+def changingBranch : Stmt :=
+  .seq stableBranch (.assign 7 (.sub (.lit 1) (.var 7)))
+def branchLoop (changing : Bool) : WhileLoop :=
+  {init := .skip, cond := nzAt 2, accVar := 3,
+   body := .add (v 3) (.checkedDiv (lit 12) (v 0)),
+   latch := .seq (if changing then changingBranch else stableBranch)
+     (.assign 2 (.sub (.var 2) (.lit 1))), ret := v 3}
+def branchEnv (d a b tag count acc : Int) : Env :=
+  fun j => if j = 0 then d else if j = 1 then a else if j = 4 then b
+    else if j = 7 then tag else if j = 2 then count else if j = 3 then acc else 0
+def stableReq : GuardIR :=
+  .conj (nzAt 0) (.conj (.imp (nzAt 7) (nzAt 1)) (.imp (.imp (nzAt 7) .bot) (nzAt 4)))
+def allSources : GuardIR := .conj (nzAt 0) (.conj (nzAt 1) (nzAt 4))
+
+def ubExit : WhileLoop :=
+  {init := .skip, cond := .bot, accVar := 3, body := lit 0, latch := .skip, ret := ubExpr}
+def outerChoice : LoopProg := .iteLoop (nzAt 7) (.whileLoop counted) (.whileLoop ubExit)
+
+def resetAccumulatorLoop : WhileLoop :=
+  {accumulatorLoop with
+   latch := .seq (.assign 3 (.lit 2)) (.assign 2 (.sub (.var 2) (.lit 1)))}
+def invariantPreheader (w : WhileLoop) (ctx target : GuardIR) : Option GuardIR :=
+  (strengthenLoopInvariantIR w.accVar w.latch target).map (hoistLoopGuardIR w.init ctx)
+def directBodyRetChecks : LoopProg → Option (Nat × Nat)
+  | .whileLoop w => some (checkedDivCount w.body, checkedDivCount w.ret)
+  | _ => none
+def clobberedSourceFrame : WhileLoop :=
+  mkFrameStmtDivLoop 0 1 2 3 (.var 0) (.lit 5) (.assign 0 (.lit 0))
+    (.ite (nzAt 0) .skip (.assign 7 (.lit 1)))
+def swapPre : Stmt :=
+  .seq (.assign 4 (.lit 0)) (.ite (nzAt 5) (.assign 9 (.lit (-1))) .skip)
+def swapPost : Stmt :=
+  .ite (.eq (.var 4) (.lit 2)) (.assign 9 (.lit 1)) (.assign 9 (.lit 2))
+def swapping : WhileLoop := mkSwapDivLoop 0 1 2 3 4 5 6 (.lit 8) (.lit 5) swapPre swapPost
+def swapEnv (x z count acc : Int) : Env :=
+  fun j => if j = 0 then x else if j = 1 then z else if j = 5 then count else if j = 6 then acc else 0
+def strictLoop (body : Expr) : WhileLoop :=
+  {init := .skip, cond := .top, accVar := 3, body := body, latch := .skip, ret := lit 7}
+theorem havoc_transparency_and_tautologies :
+    havocGuardIR 3 (.nonZero (.lit 2)) = .nonZero (.lit 2) ∧
+    havocGuardIR 3 (.eq (.var 3) (.var 3)) = .top ∧
+    havocGuardIR 3 (.conj (nzAt 0) (.eq (.var 3) (.var 3))) = nzAt 0 ∧
+    havocGuardIR 3 (nzAt 3) = .bot := by
+  decide
+
+theorem havoc_implication_truth_table :
+    havocGuardIR 3 (.imp (nzAt 3) (nzAt 0)) = nzAt 0 ∧
+    havocGuardIR 3 (.imp (nzAt 0) (nzAt 3)) = .imp (nzAt 0) .bot ∧
+    evalGuard (env 0 0 0 2) (havocGuardIR 3 (.imp (nzAt 0) (nzAt 3))) = true ∧
+    evalGuard (env 2 0 0 2) (havocGuardIR 3 (.imp (nzAt 0) (nzAt 3))) = false := by
+  decide
+
+theorem counted_known_reduction :
+    evalGuard (env 2 0 2 0) (nzAt 0) = true ∧
+    evalLoop 3 (env 2 0 2 0) (.whileLoop counted) = .done (.val 18) ∧
+    evalLoop 3 (env 2 0 2 0) (optimizeLoop (nzAt 0) (.whileLoop counted)) = .done (.val 18) ∧
+    loopCheckedDivCount (optimizeLoop (nzAt 0) (.whileLoop counted)) = 0 ∧
+    loopDivOpCount (optimizeLoop (nzAt 0) (.whileLoop counted)) = 1 ∧
+    loopBranchCount (optimizeLoop (nzAt 0) (.whileLoop counted)) = 0 ∧
+    execLoopCheckCost 3 (env 2 0 2 0) (.whileLoop counted) = 7 ∧
+    execLoopCheckCost 3 (env 2 0 2 0) (optimizeLoop (nzAt 0) (.whileLoop counted)) = 3 := by
+  decide
+
+theorem counted_preheader_versioning :
+    invariantPreheader counted (nzAt 0) (nzAt 1) = some .top ∧
+    invariantPreheader counted .top (nzAt 1) = some (nzAt 0) ∧
+    versionGuard (optimizeLoop .top (.whileLoop counted)) = some (nzAt 0) ∧
+    versionBodyChecks (optimizeLoop .top (.whileLoop counted)) = some (0, 1) ∧
+    loopBranchCount (optimizeLoop .top (.whileLoop counted)) = 1 ∧
+    evalLoop 3 (env 2 0 2 0) (optimizeLoop .top (.whileLoop counted)) = .done (.val 18) ∧
+    execLoopCheckCost 3 (env 2 0 2 0) (optimizeLoop .top (.whileLoop counted)) = 4 := by
+  decide
+
+/-- The preheader tests the source of initialization, not the old divisor value. -/
+theorem zero_trip_zero_divisor_safety :
+    evalLoop 1 (env 0 7 0 5) (.whileLoop counted) = .done (.val 5) ∧
+    evalLoop 1 (env 0 7 0 5) (optimizeLoop .top (.whileLoop counted)) = .done (.val 5) ∧
+    evalLoop 2 (env 0 7 1 5) (.whileLoop counted) = .done .trap ∧
+    evalLoop 2 (env 0 7 1 5) (optimizeLoop .top (.whileLoop counted)) = .done .trap ∧
+    evalLoop 0 (env 0 7 0 5) (.whileLoop counted) = .outOfFuel ∧
+    evalLoop 0 (env 0 7 0 5) (optimizeLoop .top (.whileLoop counted)) = .outOfFuel := by
+  decide
+
+theorem fuel_boundary_and_negative_counter :
+    evalLoop 2 (env 2 0 2 0) (.whileLoop counted) = .outOfFuel ∧
+    evalLoop 2 (env 2 0 2 0) (optimizeLoop (nzAt 0) (.whileLoop counted)) = .outOfFuel ∧
+    execLoopCheckCost 2 (env 2 0 2 0) (.whileLoop counted) = 6 ∧
+    execLoopCheckCost 2 (env 2 0 2 0) (optimizeLoop (nzAt 0) (.whileLoop counted)) = 2 ∧
+    evalLoop 4 (env 2 0 (-1) 0) (.whileLoop counted) = .outOfFuel ∧
+    evalLoop 4 (env 2 0 (-1) 0) (optimizeLoop .top (.whileLoop counted)) = .outOfFuel ∧
+    execLoopCheckCost 4 (env 2 0 (-1) 0) (.whileLoop counted) = 12 ∧
+    execLoopCheckCost 4 (env 2 0 (-1) 0) (optimizeLoop (nzAt 0) (.whileLoop counted)) = 4 ∧
+    execLoopCheckCost 4 (env 2 0 (-1) 0) (optimizeLoop .top (.whileLoop counted)) = 5 := by
+  decide
+
+theorem static_facts_survive_in_slow_version :
+    evalGuard (env 2 3 2 0) (nzAt 0) = true ∧
+    versionGuard (optimizeLoop (nzAt 0) (.whileLoop mixedLoop)) = some (nzAt 1) ∧
+    versionBodyChecks (optimizeLoop (nzAt 0) (.whileLoop mixedLoop)) = some (0, 1) ∧
+    evalLoop 3 (env 2 3 2 0) (.whileLoop mixedLoop) = .done (.val 7) ∧
+    evalLoop 3 (env 2 3 2 0) (optimizeLoop (nzAt 0) (.whileLoop mixedLoop)) = .done (.val 7) ∧
+    execLoopCheckCost 3 (env 2 3 2 0) (.whileLoop mixedLoop) = 7 ∧
+    execLoopCheckCost 3 (env 2 3 2 0) (optimizeLoop (nzAt 0) (.whileLoop mixedLoop)) = 4 ∧
+    evalLoop 2 (env 2 0 1 0) (.whileLoop mixedLoop) = .done .trap ∧
+    evalLoop 2 (env 2 0 1 0) (optimizeLoop (nzAt 0) (.whileLoop mixedLoop)) = .done .trap := by
+  decide
+
+/-- An entry fact about the accumulator cannot survive an arbitrary body write. -/
+theorem accumulator_havoc_preserves_checks :
+    evalGuard (env 0 0 2 2) (nzAt 3) = true ∧
+    invariantAt 3 .skip (nzAt 3) (env 0 0 2 2) = false ∧
+    evalLoop 3 (env 0 0 2 2) (.whileLoop accumulatorLoop) = .done .trap ∧
+    evalLoop 3 (env 0 0 2 2) (optimizeLoop (nzAt 3) (.whileLoop accumulatorLoop)) = .done .trap ∧
+    loopCheckedDivCount (optimizeLoop (nzAt 3) (.whileLoop accumulatorLoop)) = 1 ∧
+    loopBranchCount (optimizeLoop (nzAt 3) (.whileLoop accumulatorLoop)) = 0 := by
+  decide
+
+theorem havoc_propagates_through_latch_copy :
+    evalGuard (env 2 0 2 5) (nzAt 0) = true ∧
+    invariantAt 3 copiedAccumulatorLoop.latch (nzAt 0) (env 2 0 2 5) = false ∧
+    evalLoop 3 (env 2 0 2 5) (.whileLoop copiedAccumulatorLoop) = .done .trap ∧
+    evalLoop 3 (env 2 0 2 5) (optimizeLoop (nzAt 0) (.whileLoop copiedAccumulatorLoop)) = .done .trap := by
+  decide
+
+/-- Latch execution follows the body write and may establish a fresh accumulator invariant. -/
+theorem latch_reestablishes_accumulator :
+    strengthenLoopInvariantIR 3 resetAccumulatorLoop.latch (nzAt 3) = some (nzAt 3) ∧
+    evalGuard (env 0 0 2 2) (nzAt 3) = true ∧
+    evalLoop 3 (env 0 0 2 2) (.whileLoop resetAccumulatorLoop) = .done (.val 2) ∧
+    evalLoop 3 (env 0 0 2 2) (optimizeLoop (nzAt 3) (.whileLoop resetAccumulatorLoop)) = .done (.val 2) ∧
+    loopCheckedDivCount (optimizeLoop (nzAt 3) (.whileLoop resetAccumulatorLoop)) = 0 ∧
+    execLoopCheckCost 3 (env 0 0 2 2) (.whileLoop resetAccumulatorLoop) = 5 ∧
+    execLoopCheckCost 3 (env 0 0 2 2) (optimizeLoop (nzAt 3) (.whileLoop resetAccumulatorLoop)) = 3 ∧
+    evalLoop 1 (env 0 0 0 0) (optimizeLoop .top (.whileLoop resetAccumulatorLoop)) = .done (.val 0) ∧
+    evalLoop 2 (env 0 0 1 0) (optimizeLoop .top (.whileLoop resetAccumulatorLoop)) = .done .trap := by
+  decide
+
+/-- A body check can use the current condition; that fact must not leak into the exit. -/
+theorem body_and_exit_conditions_are_distinct :
+    evalLoop 3 (env 0 0 2 0) (.whileLoop counterDivisionLoop) = .done (.val 12) ∧
+    evalLoop 3 (env 0 0 2 0) (optimizeLoop .top (.whileLoop counterDivisionLoop)) = .done (.val 12) ∧
+    loopCheckedDivCount (optimizeLoop .top (.whileLoop counterDivisionLoop)) = 0 ∧
+    loopBranchCount (optimizeLoop .top (.whileLoop counterDivisionLoop)) = 0 ∧
+    execLoopCheckCost 3 (env 0 0 2 0) (.whileLoop counterDivisionLoop) = 5 ∧
+    execLoopCheckCost 3 (env 0 0 2 0) (optimizeLoop .top (.whileLoop counterDivisionLoop)) = 3 ∧
+    directBodyRetChecks (optimizeLoop .top (.whileLoop checkedExit)) = some (0, 1) ∧
+    evalLoop 3 (env 0 0 2 0) (.whileLoop checkedExit) = .done .trap ∧
+    evalLoop 3 (env 0 0 2 0) (optimizeLoop .top (.whileLoop checkedExit)) = .done .trap ∧
+    evalLoop 1 (env 0 0 0 0) (.whileLoop checkedExit) = .done .trap ∧
+    evalLoop 1 (env 0 0 0 0) (optimizeLoop .top (.whileLoop checkedExit)) = .done .trap := by
+  decide
+
+theorem five_stage_pipeline_reduction :
+    evalGuard (chainEnv 12 5) (nzRange 0 5) = true ∧
+    invariantAt 21 (chainLoop 5).latch (nzAt 0) (chainEnv 12 5) = true ∧
+    invariantAt 21 (chainLoop 5).latch (nzAt 0) (chainEnv 0 5) = false ∧
+    invariantPreheader (chainLoop 5) (nzRange 0 5) (nzAt 0) = some .top ∧
+    evalLoop 6 (chainEnv 12 5) (.whileLoop (chainLoop 5)) = .done (.val 16) ∧
+    evalLoop 6 (chainEnv 12 5) (optimizeLoop (nzRange 0 5) (.whileLoop (chainLoop 5))) = .done (.val 16) ∧
+    loopCheckedDivCount (optimizeLoop (nzRange 0 5) (.whileLoop (chainLoop 5))) = 0 ∧
+    loopBranchCount (optimizeLoop (nzRange 0 5) (.whileLoop (chainLoop 5))) = 0 ∧
+    execLoopCheckCost 6 (chainEnv 12 5) (.whileLoop (chainLoop 5)) = 11 ∧
+    execLoopCheckCost 6 (chainEnv 12 5) (optimizeLoop (nzRange 0 5) (.whileLoop (chainLoop 5))) = 6 := by
+  decide
+
+theorem future_zero_does_not_trap_before_it_is_used :
+    evalLoop 5 (chainEnv 0 4) (.whileLoop (chainLoop 5)) = .done (.val 15) ∧
+    evalLoop 5 (chainEnv 0 4) (optimizeLoop .top (.whileLoop (chainLoop 5))) = .done (.val 15) ∧
+    evalLoop 6 (chainEnv 0 5) (.whileLoop (chainLoop 5)) = .done .trap ∧
+    evalLoop 6 (chainEnv 0 5) (optimizeLoop .top (.whileLoop (chainLoop 5))) = .done .trap ∧
+    evalLoop 4 (chainEnv 0 5) (.whileLoop (chainLoop 5)) = .outOfFuel ∧
+    evalLoop 4 (chainEnv 0 5) (optimizeLoop .top (.whileLoop (chainLoop 5))) = .outOfFuel := by
+  decide
+
+theorem bounded_saturation_is_conservative :
+    strengthenLoopInvariantIR 21 (chainLoop 9).latch (nzAt 0) = none ∧
+    loopCheckedDivCount (optimizeLoop (nzRange 0 9) (.whileLoop (chainLoop 9))) = 1 ∧
+    evalGuard (chainEnv 12 1) (nzRange 0 9) = true ∧
+    evalLoop 2 (chainEnv 12 1) (.whileLoop (chainLoop 9)) = .done (.val 6) ∧
+    evalLoop 2 (chainEnv 12 1) (optimizeLoop (nzRange 0 9) (.whileLoop (chainLoop 9))) = .done (.val 6) := by
+  decide
+
+theorem stable_branch_conditional_invariant :
+    strengthenLoopInvariantIR 3 stableBranch (nzAt 0) = some stableReq ∧
+    invariantAt 3 stableBranch (nzAt 0) (branchEnv 2 3 0 1 2 0) = true ∧
+    invariantAt 3 stableBranch (nzAt 0) (branchEnv 2 0 4 0 2 0) = true ∧
+    invariantAt 3 stableBranch (nzAt 0) (branchEnv 2 0 4 1 2 0) = false ∧
+    invariantAt 3 stableBranch (nzAt 0) (branchEnv 2 3 0 0 2 0) = false ∧
+    invariantAt 3 stableBranch (nzAt 0) (branchEnv 0 3 4 1 2 0) = false := by
+  decide
+
+theorem stable_branch_allows_unused_zero_source :
+    evalGuard (branchEnv 2 3 0 1 2 0) stableReq = true ∧
+    evalLoop 3 (branchEnv 2 3 0 1 2 0) (.whileLoop (branchLoop false)) = .done (.val 10) ∧
+    evalLoop 3 (branchEnv 2 3 0 1 2 0) (optimizeLoop stableReq (.whileLoop (branchLoop false))) = .done (.val 10) ∧
+    loopCheckedDivCount (optimizeLoop stableReq (.whileLoop (branchLoop false))) = 0 ∧
+    loopBranchCount (optimizeLoop stableReq (.whileLoop (branchLoop false))) = 0 ∧
+    execLoopCheckCost 3 (branchEnv 2 3 0 1 2 0) (.whileLoop (branchLoop false)) = 7 ∧
+    execLoopCheckCost 3 (branchEnv 2 3 0 1 2 0) (optimizeLoop stableReq (.whileLoop (branchLoop false))) = 5 := by
+  decide
+
+theorem changing_branch_requires_both_sources :
+    strengthenLoopInvariantIR 3 changingBranch (nzAt 0) = some allSources ∧
+    invariantAt 3 changingBranch (nzAt 0) (branchEnv 2 3 0 1 3 0) = false ∧
+    invariantAt 3 changingBranch (nzAt 0) (branchEnv 2 3 4 1 3 0) = true ∧
+    evalGuard (branchEnv 2 3 4 1 3 0) allSources = true ∧
+    evalLoop 4 (branchEnv 2 3 4 1 3 0) (.whileLoop (branchLoop true)) = .done (.val 13) ∧
+    evalLoop 4 (branchEnv 2 3 4 1 3 0) (optimizeLoop allSources (.whileLoop (branchLoop true))) = .done (.val 13) ∧
+    loopCheckedDivCount (optimizeLoop allSources (.whileLoop (branchLoop true))) = 0 ∧
+    execLoopCheckCost 4 (branchEnv 2 3 4 1 3 0) (.whileLoop (branchLoop true)) = 10 ∧
+    execLoopCheckCost 4 (branchEnv 2 3 4 1 3 0) (optimizeLoop allSources (.whileLoop (branchLoop true))) = 7 := by
+  decide
+
+theorem changing_branch_trap_is_not_hidden :
+    let ctx := GuardIR.conj (nzAt 0) (.conj (nzAt 1) (nzAt 7))
+    evalGuard (branchEnv 2 3 0 1 3 0) ctx = true ∧
+    versionGuard (optimizeLoop ctx (.whileLoop (branchLoop true))) = some (nzAt 4) ∧
+    versionBodyChecks (optimizeLoop ctx (.whileLoop (branchLoop true))) = some (0, 1) ∧
+    evalLoop 4 (branchEnv 2 3 0 1 3 0) (.whileLoop (branchLoop true)) = .done .trap ∧
+    evalLoop 4 (branchEnv 2 3 0 1 3 0) (optimizeLoop ctx (.whileLoop (branchLoop true))) = .done .trap := by
+  decide
+
+theorem source_clobber_does_not_kill_saved_divisor :
+    let rho := env 2 0 2 0
+    let initial := execStmt clobberedSourceFrame.init rho
+    let afterOne := execStmt clobberedSourceFrame.latch (updateEnv initial 3 6)
+    evalGuard rho (nzAt 0) = true ∧ evalGuard afterOne (nzAt 0) = false ∧
+    evalGuard afterOne (nzAt 1) = true ∧
+    evalLoop 3 rho (.whileLoop clobberedSourceFrame) = .done (.val 11) ∧
+    evalLoop 3 rho (optimizeLoop (nzAt 0) (.whileLoop clobberedSourceFrame)) = .done (.val 11) ∧
+    loopCheckedDivCount (optimizeLoop (nzAt 0) (.whileLoop clobberedSourceFrame)) = 0 ∧
+    execLoopCheckCost 3 rho (.whileLoop clobberedSourceFrame) = 9 ∧
+    execLoopCheckCost 3 rho (optimizeLoop (nzAt 0) (.whileLoop clobberedSourceFrame)) = 5 := by
+  decide
+
+theorem swap_with_nontrivial_surrounding_statements :
+    stmtWritesVar 4 swapPre = true ∧ stmtWritesVar 2 swapPre = false ∧
+    evalGuard (swapEnv 2 4 2 0) (.conj (nzAt 0) (nzAt 1)) = true ∧
+    evalLoop 3 (swapEnv 2 4 2 0) (.whileLoop swapping) = .done (.val 16) ∧
+    evalLoop 3 (swapEnv 2 4 2 0) (optimizeLoop (.conj (nzAt 0) (nzAt 1)) (.whileLoop swapping)) = .done (.val 16) ∧
+    loopCheckedDivCount (optimizeLoop (.conj (nzAt 0) (nzAt 1)) (.whileLoop swapping)) = 0 ∧
+    execLoopCheckCost 3 (swapEnv 2 4 2 0) (.whileLoop swapping) = 11 ∧
+    execLoopCheckCost 3 (swapEnv 2 4 2 0) (optimizeLoop (.conj (nzAt 0) (nzAt 1)) (.whileLoop swapping)) = 7 ∧
+    evalLoop 3 (swapEnv 2 (-4) 2 0) (optimizeLoop (.conj (nzAt 0) (nzAt 1)) (.whileLoop swapping)) = .done (.val 12) := by
+  decide
+
+theorem outer_loop_choices_are_contextual :
+    let ctx := GuardIR.conj (nzAt 7) (nzAt 0)
+    let rho := branchEnv 2 0 0 1 2 0
+    evalGuard rho ctx = true ∧
+    evalLoop 3 rho outerChoice = .done (.val 18) ∧
+    evalLoop 3 rho (optimizeLoop ctx outerChoice) = .done (.val 18) ∧
+    loopBranchCount (optimizeLoop ctx outerChoice) = 0 ∧
+    evalGuard (fun _ => 0) (.imp (nzAt 7) .bot) = true ∧
+    evalLoop 1 (fun _ => 0) outerChoice = .done .ub ∧
+    evalLoop 1 (fun _ => 0) (optimizeLoop (.imp (nzAt 7) .bot) outerChoice) = .done .ub ∧
+    loopBranchCount (optimizeLoop (.imp (nzAt 7) .bot) outerChoice) = 0 ∧
+    evalLoop 0 (fun _ => 0) (optimizeLoop (.imp (nzAt 7) .bot) outerChoice) = .outOfFuel := by
+  decide
+
+theorem decrementing_divisor_keeps_second_trip_trap :
+    let w := mkDecrementDivisorLoop 0 1 2 3 (.lit 8)
+    evalGuard (env 1 7 2 0) (nzAt 0) = true ∧
+    evalLoop 1 (env 1 7 2 0) (.whileLoop w) = .outOfFuel ∧
+    evalLoop 1 (env 1 7 2 0) (optimizeLoop (nzAt 0) (.whileLoop w)) = .outOfFuel ∧
+    evalLoop 2 (env 1 7 2 0) (.whileLoop w) = .done .trap ∧
+    evalLoop 2 (env 1 7 2 0) (optimizeLoop (nzAt 0) (.whileLoop w)) = .done .trap ∧
+    evalLoop 3 (env 1 7 2 0) (optimizeLoop (nzAt 0) (.whileLoop w)) = .done .trap ∧
+    loopCheckedDivCount (optimizeLoop (nzAt 0) (.whileLoop w)) = 1 := by
+  decide
+
+theorem strict_failures_and_existing_ub :
+    evalLoop 1 (fun _ => 0) (.whileLoop (strictLoop (.mul (lit 0) trapExpr))) = .done .trap ∧
+    evalLoop 1 (fun _ => 0)
+      (optimizeLoop .top (.whileLoop (strictLoop (.mul (lit 0) trapExpr)))) = .done .trap ∧
+    evalLoop 1 (fun _ => 0) (.whileLoop (strictLoop (.mul (lit 0) ubExpr))) = .done .ub ∧
+    evalLoop 1 (fun _ => 0)
+      (optimizeLoop .top (.whileLoop (strictLoop (.mul (lit 0) ubExpr)))) = .done .ub ∧
+    evalLoop 1 (fun _ => 0)
+      (optimizeLoop .top (.whileLoop {strictLoop ubExpr with cond := .bot})) = .done (.val 7) ∧
+    evalLoop 3 (env 0 0 2 2)
+      (.whileLoop {accumulatorLoop with body := .uncheckedDiv (lit 1) (v 3)}) = .done .ub ∧
+    evalLoop 3 (env 0 0 2 2)
+      (optimizeLoop (nzAt 3) (.whileLoop {accumulatorLoop with body := .uncheckedDiv (lit 1) (v 3)})) = .done .ub := by
+  decide
+
+def sweepCases : List (GuardIR × LoopProg × Env) :=
+  [(nzAt 0, .whileLoop counted, env 2 0 2 0),
+   (.top, .whileLoop counted, env 0 7 0 5),
+   (.top, .whileLoop counted, env 0 7 1 5),
+   (nzAt 0, .whileLoop counted, env (-2) 0 2 0),
+   (nzAt 0, .whileLoop counted, env 2 0 (-1) 0),
+   (nzAt 0, .whileLoop mixedLoop, env 2 0 2 0),
+   (nzAt 3, .whileLoop accumulatorLoop, env 0 0 2 2),
+   (nzAt 3, .whileLoop resetAccumulatorLoop, env 0 0 2 2),
+   (.top, .whileLoop counterDivisionLoop, env 0 0 2 0),
+   (.top, .whileLoop checkedExit, env 0 0 2 0),
+   (stableReq, .whileLoop (branchLoop false), branchEnv 2 3 0 1 2 0),
+   (allSources, .whileLoop (branchLoop true), branchEnv 2 3 4 1 3 0),
+   (.conj (nzAt 0) (.conj (nzAt 1) (nzAt 7)), .whileLoop (branchLoop true), branchEnv 2 3 0 1 3 0),
+   (nzRange 0 5, .whileLoop (chainLoop 5), chainEnv 12 5),
+   (.top, .whileLoop (chainLoop 5), chainEnv 0 4),
+   (.top, .whileLoop (chainLoop 5), chainEnv 0 5),
+   (nzAt 0, .whileLoop clobberedSourceFrame, env 2 0 2 0),
+   (.conj (nzAt 0) (nzAt 1), .whileLoop swapping, swapEnv 2 4 2 0),
+   (.conj (nzAt 7) (nzAt 0), outerChoice, branchEnv 2 0 0 1 2 0),
+   (.imp (nzAt 7) .bot, outerChoice, fun _ => 0)]
+def fuels : List Nat := [0, 1, 2, 3, 4, 5, 6]
+
+theorem sweep_dimensions :
+    sweepCases.length = 20 ∧ fuels.length = 7 := by
+  decide
+
+theorem sweep_contexts_hold :
+    sweepCases.all (fun (ctx, _, rho) => evalGuard rho ctx) = true := by
+  decide
+
+theorem bounded_loop_semantic_sweep :
+    sweepCases.all (fun (ctx, prog, rho) =>
+      fuels.all (fun fuel => decide (evalLoop fuel rho (optimizeLoop ctx prog) = evalLoop fuel rho prog))) = true := by
+  decide
+
+end CatSem.PostImplAudit.M3
+
+-- M3 public API and explicit transitive dependency reports for every new audit declaration.
+#print axioms CatSem.havocGuardIR
+#print axioms CatSem.strengthenLoopInvariantIR
+#print axioms CatSem.hoistLoopGuardIR
+#print axioms CatSem.optimizeLoop
+#print axioms CatSem.stateTransfer_iterate_pullback_iff
+#print axioms CatSem.havocGuardIR_sound
+#print axioms CatSem.havocGuardIR_exact_of_nonMention
+#print axioms CatSem.strengthenLoopInvariantIR_inductive
+#print axioms CatSem.strengthenLoopInvariantIR_stationary
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline
+#print axioms CatSem.hoistLoopGuardIR_denote
+#print axioms CatSem.hoistLoopGuardIR_iterate_target
+#print axioms CatSem.optimizeLoop_guardedEquiv
+#print axioms CatSem.optimizeLoop_sound
+#print axioms CatSem.optimizeLoop_known_ctx_elim_param
+#print axioms CatSem.optimizeLoop_unknown_ctx_hoist_param
+#print axioms CatSem.optimizeLoop_zero_div_behavior_param
+#print axioms CatSem.optimizeLoop_pipeline_elim_param
+#print axioms CatSem.optimizeLoop_decrement_div_trap_param
+#print axioms CatSem.strengthenLoopInvariantIR_stationary_safe
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline_safe
+#print axioms CatSem.strengthenLoopInvariantIR_step_complete
+#print axioms CatSem.havocGuardIR_nonMention_eq
+#print axioms CatSem.strengthenLoopInvariantIR_frame_stmt_safe
+#print axioms CatSem.strengthenLoopInvariantIR_swap_safe
+#print axioms CatSem.strengthenLoopInvariantIR_pipeline3_safe
+#print axioms CatSem.strengthenLoopInvariantIR_ite_branch_safe
+#print axioms CatSem.optimizeLoop_frame_stmt_elim_param
+#print axioms CatSem.optimizeLoop_swap_elim_param
+#print axioms CatSem.optimizeLoop_pipeline3_elim_param
+#print axioms CatSem.optimizeLoop_ite_branch_elim_param
+#print axioms CatSem.PostImplAudit.M3.nzAt
+#print axioms CatSem.PostImplAudit.M3.counted
+#print axioms CatSem.PostImplAudit.M3.versionBodyChecks
+#print axioms CatSem.PostImplAudit.M3.versionGuard
+#print axioms CatSem.PostImplAudit.M3.invariantAt
+#print axioms CatSem.PostImplAudit.M3.mixedLoop
+#print axioms CatSem.PostImplAudit.M3.accumulatorLoop
+#print axioms CatSem.PostImplAudit.M3.copiedAccumulatorLoop
+#print axioms CatSem.PostImplAudit.M3.counterDivisionLoop
+#print axioms CatSem.PostImplAudit.M3.checkedExit
+#print axioms CatSem.PostImplAudit.M3.chainMoves
+#print axioms CatSem.PostImplAudit.M3.chainLoop
+#print axioms CatSem.PostImplAudit.M3.nzRange
+#print axioms CatSem.PostImplAudit.M3.chainEnv
+#print axioms CatSem.PostImplAudit.M3.stableBranch
+#print axioms CatSem.PostImplAudit.M3.changingBranch
+#print axioms CatSem.PostImplAudit.M3.branchLoop
+#print axioms CatSem.PostImplAudit.M3.branchEnv
+#print axioms CatSem.PostImplAudit.M3.stableReq
+#print axioms CatSem.PostImplAudit.M3.allSources
+#print axioms CatSem.PostImplAudit.M3.ubExit
+#print axioms CatSem.PostImplAudit.M3.outerChoice
+#print axioms CatSem.PostImplAudit.M3.resetAccumulatorLoop
+#print axioms CatSem.PostImplAudit.M3.invariantPreheader
+#print axioms CatSem.PostImplAudit.M3.directBodyRetChecks
+#print axioms CatSem.PostImplAudit.M3.clobberedSourceFrame
+#print axioms CatSem.PostImplAudit.M3.swapPre
+#print axioms CatSem.PostImplAudit.M3.swapPost
+#print axioms CatSem.PostImplAudit.M3.swapping
+#print axioms CatSem.PostImplAudit.M3.swapEnv
+#print axioms CatSem.PostImplAudit.M3.strictLoop
+#print axioms CatSem.PostImplAudit.M3.havoc_transparency_and_tautologies
+#print axioms CatSem.PostImplAudit.M3.havoc_implication_truth_table
+#print axioms CatSem.PostImplAudit.M3.counted_known_reduction
+#print axioms CatSem.PostImplAudit.M3.counted_preheader_versioning
+#print axioms CatSem.PostImplAudit.M3.zero_trip_zero_divisor_safety
+#print axioms CatSem.PostImplAudit.M3.fuel_boundary_and_negative_counter
+#print axioms CatSem.PostImplAudit.M3.static_facts_survive_in_slow_version
+#print axioms CatSem.PostImplAudit.M3.accumulator_havoc_preserves_checks
+#print axioms CatSem.PostImplAudit.M3.havoc_propagates_through_latch_copy
+#print axioms CatSem.PostImplAudit.M3.latch_reestablishes_accumulator
+#print axioms CatSem.PostImplAudit.M3.body_and_exit_conditions_are_distinct
+#print axioms CatSem.PostImplAudit.M3.five_stage_pipeline_reduction
+#print axioms CatSem.PostImplAudit.M3.future_zero_does_not_trap_before_it_is_used
+#print axioms CatSem.PostImplAudit.M3.bounded_saturation_is_conservative
+#print axioms CatSem.PostImplAudit.M3.stable_branch_conditional_invariant
+#print axioms CatSem.PostImplAudit.M3.stable_branch_allows_unused_zero_source
+#print axioms CatSem.PostImplAudit.M3.changing_branch_requires_both_sources
+#print axioms CatSem.PostImplAudit.M3.changing_branch_trap_is_not_hidden
+#print axioms CatSem.PostImplAudit.M3.source_clobber_does_not_kill_saved_divisor
+#print axioms CatSem.PostImplAudit.M3.swap_with_nontrivial_surrounding_statements
+#print axioms CatSem.PostImplAudit.M3.outer_loop_choices_are_contextual
+#print axioms CatSem.PostImplAudit.M3.decrementing_divisor_keeps_second_trip_trap
+#print axioms CatSem.PostImplAudit.M3.strict_failures_and_existing_ub
+#print axioms CatSem.PostImplAudit.M3.sweepCases
+#print axioms CatSem.PostImplAudit.M3.fuels
+#print axioms CatSem.PostImplAudit.M3.sweep_dimensions
+#print axioms CatSem.PostImplAudit.M3.sweep_contexts_hold
+#print axioms CatSem.PostImplAudit.M3.bounded_loop_semantic_sweep

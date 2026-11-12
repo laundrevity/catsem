@@ -23,9 +23,11 @@ mkdir -p scripts reviews
 cp ../wt-antigravity/scripts/* scripts/
 chmod +x scripts/*.sh scripts/*.py
 
-if [[ -f ../wt-antigravity/reviews/M1-prelock-r3-disposition.md ]]; then
-  cp ../wt-antigravity/reviews/M1-prelock-r3-disposition.md reviews/M1-prelock-r3-disposition.md
-fi
+shopt -s nullglob
+for rf in ../wt-antigravity/reviews/M*-prelock*.md; do
+  dst="reviews/$(basename "$rf")"
+  [[ "$rf" -ef "$dst" ]] || cp "$rf" "$dst"
+done
 
 SPEC_SHA=$(shasum -a 256 Specs/Defs.lean Specs/Target.lean Specs/Verify.lean blueprint/lemma_dag.json | shasum -a 256 | awk '{print $1}')
 echo "$SPEC_SHA" > reviews/current_spec.sha256
@@ -39,14 +41,10 @@ for wt in ../wt-antigravity ../wt-claude ../wt-codex; do
   cp scripts/verify.sh scripts/check_axioms.py scripts/audit_modules.py scripts/sync_specs.sh scripts/sync_for_audit.sh scripts/test_gate_regressions.py "$wt/scripts/"
   chmod +x "$wt/scripts/"*.sh "$wt/scripts/"*.py
   cp reviews/current_spec.sha256 reviews/current_gate.sha256 "$wt/reviews/"
-  cp reviews/M1-prelock-r1.md reviews/M1-prelock-r1-disposition.md "$wt/reviews/"
-  cp reviews/M1-prelock-r2.md reviews/M1-prelock-r2-disposition.md "$wt/reviews/"
-  if [[ -f reviews/M1-prelock-r3.md ]]; then
-    cp reviews/M1-prelock-r3.md "$wt/reviews/"
-  fi
-  if [[ -f reviews/M1-prelock-r3-disposition.md ]]; then
-    cp reviews/M1-prelock-r3-disposition.md "$wt/reviews/"
-  fi
+  for rf in reviews/M*-prelock*.md; do
+    dst="$wt/reviews/$(basename "$rf")"
+    [[ "$rf" -ef "$dst" ]] || cp "$rf" "$dst"
+  done
 done
 
 echo "✅ Synced across all worktrees:"

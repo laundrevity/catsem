@@ -2417,4 +2417,2473 @@ theorem optimizeBlock_dead_branch_elim_param (p : PureExpr) (d : VarId)
   rw [hb, hret]
   rfl
 
+/-! ## Milestone 3: Fuel-Indexed Imperative Loops, Inductive Strengthening & Preheader Guard Hoisting -/
+
+/-! ### Loop passes
+
+`havocGuardIR` quantifies a guard over every value of the accumulator,
+`strengthenLoopInvariantIR` searches backwards for an inductive invariant, `hoistLoopGuardIR`
+is the edge guard across the preheader, and `optimizeLoop` combines the three to remove
+runtime checks from the loop body. -/
+
+/-- Computable conservative universal-quantification pullback of a `GuardIR` across a write to `v`. -/
+def havocGuardIR (v : VarId) (g : GuardIR) : GuardIR :=
+  if guardMentionsVar v g then
+    match g with
+    | .conj g₁ g₂ => GuardIR.mkConj (havocGuardIR v g₁) (havocGuardIR v g₂)
+    | .imp g₁ g₂ =>
+      if guardMentionsVar v g₁ then havocGuardIR v g₂
+      else GuardIR.mkImp g₁ (havocGuardIR v g₂)
+    | g =>
+      let g' := GuardIR.norm g
+      if guardMentionsVar v g' then .bot else g'
+  else g
+
+/-! `strengthenLoopInvariantIR` tries four candidates in order and returns the first that it
+can show closed under one loop iteration:
+
+1. the target itself;
+2. the target together with its exact backward image, when the conservative backward image
+   of that new conjunct is already entailed (this keeps path conditions such as
+   `c ⇨ nonZero d₁` when the branch condition and the sources are stable);
+3. the same candidate under the literal one-step test on its exact backward image;
+4. bounded backward saturation with a path-insensitive precondition, which finds the
+   conjunctions needed by pipelines and by branches whose condition changes. -/
+
+/-- Exact backward image of a guard across one abstract loop iteration
+    (`accVar := *; latch`). -/
+private def GuardIR.loopStep (accVar : VarId) (latch : Stmt) (g : GuardIR) : GuardIR :=
+  havocGuardIR accVar (pullbackGuardIR latch g)
+
+/-- `g` entails `step`, either literally (the Milestone 1 test, i.e.
+    `synthesizeGuardIR g step = .top`) or after arithmetic normalisation of both sides.
+    With `step` the backward image of `g`, this says that `g` is closed under one loop
+    iteration. -/
+private def GuardIR.closedBy (g step : GuardIR) : Bool :=
+  GuardIR.entails g step || GuardIR.entails (GuardIR.norm g) (GuardIR.norm step)
+
+/-- Number of connectives and atoms of a guard. -/
+private def GuardIR.size : GuardIR → Nat
+  | .conj g h | .imp g h => GuardIR.size g + GuardIR.size h + 1
+  | _ => 1
+
+/-- Path-insensitive join of the preconditions of the two arms of a branch: both are
+    required, without recording the branch condition. Conjuncts of `b` already present in
+    `a` are dropped. Distinct arms that are too large to compare, or whose join grows beyond
+    a fixed budget, give up with `.bot`; this keeps the work of the conservative
+    precondition bounded on branch-heavy latches. -/
+private def GuardIR.join (a b : GuardIR) : GuardIR :=
+  if a = b then a
+  else if 512 < GuardIR.size a + GuardIR.size b then .bot
+  else
+    let j := GuardIR.mkConj a (GuardIR.residual a b)
+    if 256 < GuardIR.size j then .bot else j
+
+/-- Conservative precondition of `g` across a statement: assignments substitute, and a
+    branch requires the preconditions of both arms. Unlike `pullbackGuardIR` it is not
+    exact, but it keeps a conjunction of atoms a conjunction of atoms. -/
+private def Stmt.pullbackAll : Stmt → GuardIR → GuardIR
+  | .skip, g => g
+  | .assign v rhs, g => GuardIR.subst v rhs g
+  | .seq s₁ s₂, g => Stmt.pullbackAll s₁ (Stmt.pullbackAll s₂ g)
+  | .ite _ t f, g => GuardIR.join (Stmt.pullbackAll t g) (Stmt.pullbackAll f g)
+
+/-- What `g` still lacks to be closed under one loop iteration, computed with the
+    conservative precondition: `.top` means that `g` is inductive. -/
+private def GuardIR.backStep (accVar : VarId) (latch : Stmt) (g : GuardIR) : GuardIR :=
+  GuardIR.simplifyUnder (GuardIR.norm g)
+    (GuardIR.norm (havocGuardIR accVar (Stmt.pullbackAll latch g)))
+
+/-- Bounded backward saturation: conjoins the missing part of the backward image until the
+    candidate is closed. Gives up when the missing part is contradictory or the fuel runs
+    out. -/
+private def GuardIR.saturate (accVar : VarId) (latch : Stmt) : Nat → GuardIR → Option GuardIR
+  | 0, _ => none
+  | fuel + 1, g =>
+    match GuardIR.backStep accVar latch g with
+    | .top => some g
+    | .bot => none
+    | r => GuardIR.saturate accVar latch fuel (.conj g r)
+
+/-- Computable bounded backward inductive-invariant strengthening across `(accVar, latch)` for `target`. -/
+def strengthenLoopInvariantIR (accVar : VarId) (latch : Stmt) (target : GuardIR) : Option GuardIR :=
+  let step := GuardIR.loopStep accVar latch target
+  if GuardIR.closedBy target step then some target
+  else
+    let cand := GuardIR.conj target step
+    if GuardIR.closedBy cand (havocGuardIR accVar (Stmt.pullbackAll latch step)) then some cand
+    else if GuardIR.closedBy cand (GuardIR.loopStep accVar latch cand) then some cand
+    else GuardIR.saturate accVar latch 8 target
+
+/-- Computable preheader loop-hoisted guard synthesis across `init` from `ctx` to `inv`. -/
+def hoistLoopGuardIR (init : Stmt) (ctx inv : GuardIR) : GuardIR :=
+  synthesizeStmtGuardIR init ctx inv
+
+/-- Removes repeated candidates, keeping the last occurrence of each. -/
+private def dedupGuards : List GuardIR → List GuardIR
+  | [] => []
+  | c :: cs => if cs.contains c then dedupGuards cs else c :: dedupGuards cs
+
+/-- The candidate facts that strengthen to an inductive invariant which is not
+    contradictory, each paired with that invariant. -/
+private def loopInvariants (accVar : VarId) (latch : Stmt) :
+    List GuardIR → List (GuardIR × GuardIR)
+  | [] => []
+  | c :: cs =>
+    match strengthenLoopInvariantIR accVar latch c with
+    | some inv =>
+      if GuardIR.isBot (GuardIR.norm inv) then loopInvariants accVar latch cs
+      else (c, inv) :: loopInvariants accVar latch cs
+    | none => loopInvariants accVar latch cs
+
+/-- Conjunction of the facts, and conjunction of their invariants, over the pairs whose
+    invariant passes `accept`. -/
+private def selectFacts (accept : GuardIR → Bool) :
+    List (GuardIR × GuardIR) → GuardIR × GuardIR
+  | [] => (.top, .top)
+  | p :: ps =>
+    let rest := selectFacts accept ps
+    if accept p.2 then (GuardIR.mkConj p.1 rest.1, GuardIR.mkConj p.2 rest.2) else rest
+
+/-- The loop with its body and exit expression rewritten by `optimizeBlock` under the
+    loop-header facts `F`: the body additionally knows that the loop condition holds, the
+    exit expression that it fails. -/
+private def WhileLoop.withFacts (F : GuardIR) (w : WhileLoop) : WhileLoop :=
+  { w with
+    body := (optimizeBlock (.conj F w.cond) { body := .skip, ret := w.body }).ret
+    ret := (optimizeBlock (.conj F (.imp w.cond .bot)) { body := .skip, ret := w.ret }).ret }
+
+/-- The loop rewritten under the facts whose invariant the entry context already
+    establishes across `init`, i.e. whose hoisted guard is `.top`. -/
+private def WhileLoop.staticVersion (ctx : GuardIR) (invs : List (GuardIR × GuardIR))
+    (w : WhileLoop) : WhileLoop :=
+  w.withFacts (selectFacts (fun inv => GuardIR.isTop (hoistLoopGuardIR w.init ctx inv)) invs).1
+
+/-- Loop versioning. The facts that the body and the exit expression would profit from are
+    strengthened to inductive invariants, and the conjunction of those invariants is pulled
+    back across `init` and simplified under the entry context. If nothing is left (the
+    hoisted guard is `.top`), the loop is rewritten under all facts. Otherwise the residual
+    preheader guard selects at run time between that fast loop and the loop rewritten under
+    the facts the context does establish. No branch is emitted when the two loops coincide
+    (the extra facts buy nothing) or when the context refutes the residual guard (the fast
+    loop is unreachable); the second loop is then used alone. -/
+private def WhileLoop.version (ctx : GuardIR) (w : WhileLoop) : LoopProg :=
+  let invs := loopInvariants w.accVar w.latch
+    (dedupGuards (Expr.factCandidates w.body ++ Expr.factCandidates w.ret))
+  let dyn := selectFacts (fun _ => true) invs
+  match GuardIR.simplifyUnder (GuardIR.norm ctx)
+      (GuardIR.norm (pullbackGuardIR w.init dyn.2)) with
+  | .top => .whileLoop (w.withFacts dyn.1)
+  | pre =>
+    let fast := w.withFacts dyn.1
+    let slow := w.staticVersion ctx invs
+    if fast = slow then .whileLoop slow
+    else if GuardIR.entails (GuardIR.norm ctx) (GuardIR.norm (.imp pre .bot)) then
+      .whileLoop slow
+    else .iteLoop pre (.whileLoop fast) (.whileLoop slow)
+
+/-- Computable context-sensitive loop optimizer performing inductive invariant strengthening,
+    preheader guard hoisting / loop versioning, and loop-body check elimination. -/
+def optimizeLoop (ctx : GuardIR) (prog : LoopProg) : LoopProg :=
+  match prog with
+  | .whileLoop w => WhileLoop.version ctx w
+  | .iteLoop g thenBr elseBr =>
+    if GuardIR.entailsAfter .skip ctx g then optimizeLoop ctx thenBr
+    else if GuardIR.entailsAfter .skip ctx (.imp g .bot) then optimizeLoop ctx elseBr
+    else
+      .iteLoop g (optimizeLoop (.conj ctx g) thenBr)
+        (optimizeLoop (.conj ctx (.imp g .bot)) elseBr)
+
+/-! ### Frame properties: variables a guard does not mention, variables a statement does not write -/
+
+private theorem evalPure_updateEnv_of_not_mentions {v : VarId} {p : PureExpr}
+    (h : pureMentionsVar v p = false) (env : Env) (val : Int) :
+    evalPure (updateEnv env v val) p = evalPure env p := by
+  induction p with
+  | lit n => rfl
+  | var w =>
+    have hw : decide (w = v) = false := h
+    show (if decide (w = v) then val else env w) = env w
+    rw [hw]
+    simp only [Bool.false_eq_true, ↓reduceIte]
+  | add a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [evalPure, iha h'.1, ihb h'.2]
+  | sub a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [evalPure, iha h'.1, ihb h'.2]
+  | mul a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [evalPure, iha h'.1, ihb h'.2]
+
+/-- A guard that does not mention `v` cannot observe a write to `v`. -/
+private theorem evalGuard_updateEnv_of_not_mentions {v : VarId} {g : GuardIR}
+    (h : guardMentionsVar v g = false) (env : Env) (val : Int) :
+    evalGuard (updateEnv env v val) g = evalGuard env g := by
+  induction g with
+  | top => rfl
+  | bot => rfl
+  | nonZero e =>
+    simp only [evalGuard, evalPure_updateEnv_of_not_mentions (h : pureMentionsVar v e = false)]
+  | eq a b =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [evalGuard, evalPure_updateEnv_of_not_mentions h'.1,
+      evalPure_updateEnv_of_not_mentions h'.2]
+  | conj g₁ g₂ ih₁ ih₂ =>
+    have h' := Bool.or_eq_false_iff.mp
+      (h : (guardMentionsVar v g₁ || guardMentionsVar v g₂) = false)
+    simp only [evalGuard, ih₁ h'.1, ih₂ h'.2]
+  | imp g₁ g₂ ih₁ ih₂ =>
+    have h' := Bool.or_eq_false_iff.mp
+      (h : (guardMentionsVar v g₁ || guardMentionsVar v g₂) = false)
+    simp only [evalGuard, ih₁ h'.1, ih₂ h'.2]
+
+private theorem PureExpr.subst_of_not_mentions {v : VarId} (r : PureExpr) {p : PureExpr}
+    (h : pureMentionsVar v p = false) : PureExpr.subst v r p = p := by
+  induction p with
+  | lit n => rfl
+  | var w =>
+    have hw : ¬ w = v := of_decide_eq_false h
+    simp only [PureExpr.subst, hw, ↓reduceIte]
+  | add a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [PureExpr.subst, iha h'.1, ihb h'.2]
+  | sub a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [PureExpr.subst, iha h'.1, ihb h'.2]
+  | mul a b iha ihb =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [PureExpr.subst, iha h'.1, ihb h'.2]
+
+/-- Substituting for a variable that the guard does not mention changes nothing. -/
+private theorem GuardIR.subst_of_not_mentions {v : VarId} (r : PureExpr) {g : GuardIR}
+    (h : guardMentionsVar v g = false) : GuardIR.subst v r g = g := by
+  induction g with
+  | top => rfl
+  | bot => rfl
+  | nonZero e =>
+    simp only [GuardIR.subst, PureExpr.subst_of_not_mentions r (h : pureMentionsVar v e = false)]
+  | eq a b =>
+    have h' := Bool.or_eq_false_iff.mp (h : (pureMentionsVar v a || pureMentionsVar v b) = false)
+    simp only [GuardIR.subst, PureExpr.subst_of_not_mentions r h'.1,
+      PureExpr.subst_of_not_mentions r h'.2]
+  | conj g₁ g₂ ih₁ ih₂ =>
+    have h' := Bool.or_eq_false_iff.mp
+      (h : (guardMentionsVar v g₁ || guardMentionsVar v g₂) = false)
+    simp only [GuardIR.subst, ih₁ h'.1, ih₂ h'.2]
+  | imp g₁ g₂ ih₁ ih₂ =>
+    have h' := Bool.or_eq_false_iff.mp
+      (h : (guardMentionsVar v g₁ || guardMentionsVar v g₂) = false)
+    simp only [GuardIR.subst, ih₁ h'.1, ih₂ h'.2]
+
+/-- A statement leaves every variable it does not write unchanged. -/
+private theorem execStmt_of_not_writes {v : VarId} {s : Stmt} (h : stmtWritesVar v s = false) :
+    ∀ env : Env, execStmt s env v = env v := by
+  induction s with
+  | skip => intro env; rfl
+  | assign w rhs =>
+    intro env
+    have hw : ¬ w = v := of_decide_eq_false h
+    have hvw : decide (v = w) = false := decide_eq_false (fun e => hw e.symm)
+    show (if decide (v = w) then evalPure env rhs else env v) = env v
+    rw [hvw]
+    simp only [Bool.false_eq_true, ↓reduceIte]
+  | seq s₁ s₂ ih₁ ih₂ =>
+    intro env
+    have h' := Bool.or_eq_false_iff.mp (h : (stmtWritesVar v s₁ || stmtWritesVar v s₂) = false)
+    show execStmt s₂ (execStmt s₁ env) v = env v
+    rw [ih₂ h'.2, ih₁ h'.1]
+  | ite c t f iht ihf =>
+    intro env
+    have h' := Bool.or_eq_false_iff.mp (h : (stmtWritesVar v t || stmtWritesVar v f) = false)
+    show (if evalGuard env c then execStmt t env else execStmt f env) v = env v
+    cases evalGuard env c with
+    | true => simp only [↓reduceIte]; exact iht h'.1 env
+    | false => simp only [Bool.false_eq_true, ↓reduceIte]; exact ihf h'.2 env
+
+/-! ### Semantics of `havocGuardIR` -/
+
+/-- `havocGuardIR` returns a guard that does not mention the variable unchanged. -/
+private theorem havocGuardIR_of_not_mentions {v : VarId} {g : GuardIR}
+    (h : guardMentionsVar v g = false) : havocGuardIR v g = g := by
+  rw [havocGuardIR.eq_def, h]
+  simp only [Bool.false_eq_true, ↓reduceIte]
+
+/-- Pointwise soundness of `havocGuardIR`: where the result holds, `g` holds for every
+    value written to `v`. -/
+private theorem evalGuard_havocGuardIR {v : VarId} {g : GuardIR} {env : Env}
+    (h : evalGuard env (havocGuardIR v g) = true) (val : Int) :
+    evalGuard (updateEnv env v val) g = true := by
+  have hnm : ∀ g' : GuardIR, guardMentionsVar v g' = false →
+      evalGuard env (havocGuardIR v g') = true → evalGuard (updateEnv env v val) g' = true := by
+    intro g' hm h'
+    rw [havocGuardIR_of_not_mentions hm] at h'
+    rw [evalGuard_updateEnv_of_not_mentions hm]
+    exact h'
+  have hatom : ∀ g' : GuardIR,
+      evalGuard env (if guardMentionsVar v (GuardIR.norm g') then .bot else GuardIR.norm g') = true →
+      evalGuard (updateEnv env v val) g' = true := by
+    intro g' h'
+    cases hm : guardMentionsVar v (GuardIR.norm g') with
+    | true =>
+      rw [hm] at h'
+      exact absurd h' (by simp [evalGuard])
+    | false =>
+      rw [hm] at h'
+      simp only [Bool.false_eq_true, ↓reduceIte] at h'
+      rw [← GuardIR.evalGuard_norm, evalGuard_updateEnv_of_not_mentions hm]
+      exact h'
+  induction g with
+  | top => rfl
+  | bot => exact hnm .bot rfl h
+  | nonZero e =>
+    cases hm : guardMentionsVar v (.nonZero e) with
+    | false => exact hnm _ hm h
+    | true =>
+      rw [havocGuardIR.eq_def, hm] at h
+      simp only [↓reduceIte] at h
+      exact hatom _ h
+  | eq a b =>
+    cases hm : guardMentionsVar v (.eq a b) with
+    | false => exact hnm _ hm h
+    | true =>
+      rw [havocGuardIR.eq_def, hm] at h
+      simp only [↓reduceIte] at h
+      exact hatom _ h
+  | conj g₁ g₂ ih₁ ih₂ =>
+    cases hm : guardMentionsVar v (.conj g₁ g₂) with
+    | false => exact hnm _ hm h
+    | true =>
+      rw [havocGuardIR, hm] at h
+      simp only [↓reduceIte, GuardIR.evalGuard_mkConj, Bool.and_eq_true] at h
+      show (evalGuard (updateEnv env v val) g₁ && evalGuard (updateEnv env v val) g₂) = true
+      rw [ih₁ h.1, ih₂ h.2]
+      rfl
+  | imp g₁ g₂ _ ih₂ =>
+    cases hm : guardMentionsVar v (.imp g₁ g₂) with
+    | false => exact hnm _ hm h
+    | true =>
+      rw [havocGuardIR, hm] at h
+      simp only [↓reduceIte] at h
+      show (!evalGuard (updateEnv env v val) g₁ || evalGuard (updateEnv env v val) g₂) = true
+      cases hm₁ : guardMentionsVar v g₁ with
+      | true =>
+        rw [hm₁] at h
+        simp only [↓reduceIte] at h
+        rw [ih₂ h]
+        exact Bool.or_true _
+      | false =>
+        rw [hm₁] at h
+        simp only [Bool.false_eq_true, ↓reduceIte, GuardIR.evalGuard_mkImp] at h
+        rw [evalGuard_updateEnv_of_not_mentions hm₁]
+        cases h₁ : evalGuard env g₁ with
+        | false => rfl
+        | true =>
+          rw [h₁] at h
+          rw [ih₂ h]
+          rfl
+
+/-! ### Semantics of the conservative precondition and of backward saturation -/
+
+private theorem GuardIR.evalGuard_join {env : Env} {a b : GuardIR}
+    (h : evalGuard env (GuardIR.join a b) = true) :
+    evalGuard env a = true ∧ evalGuard env b = true := by
+  unfold GuardIR.join at h
+  split at h
+  · next hab => subst hab; exact ⟨h, h⟩
+  · split at h
+    · exact absurd h (by simp [evalGuard])
+    · simp only [] at h
+      split at h
+      · exact absurd h (by simp [evalGuard])
+      · rw [GuardIR.evalGuard_mkConj, Bool.and_eq_true] at h
+        refine ⟨h.1, ?_⟩
+        rw [← GuardIR.evalGuard_residual h.1 b]
+        exact h.2
+
+/-- Soundness of the conservative precondition: it implies the exact one. -/
+private theorem Stmt.evalGuard_pullbackAll (s : Stmt) :
+    ∀ (g : GuardIR) (env : Env), evalGuard env (Stmt.pullbackAll s g) = true →
+      evalGuard (execStmt s env) g = true := by
+  induction s with
+  | skip => intro g env h; exact h
+  | assign v rhs =>
+    intro g env h
+    rw [Stmt.pullbackAll, GuardIR.evalGuard_subst] at h
+    exact h
+  | seq s₁ s₂ ih₁ ih₂ =>
+    intro g env h
+    exact ih₂ g _ (ih₁ _ env h)
+  | ite c t f iht ihf =>
+    intro g env h
+    have hj := GuardIR.evalGuard_join h
+    show evalGuard (if evalGuard env c then execStmt t env else execStmt f env) g = true
+    cases evalGuard env c with
+    | true => simp only [↓reduceIte]; exact iht g env hj.1
+    | false => simp only [Bool.false_eq_true, ↓reduceIte]; exact ihf g env hj.2
+
+/-- Soundness of the Milestone 1 entailment test. -/
+private theorem GuardIR.entails_sound {c g : GuardIR} {env : Env}
+    (h : GuardIR.entails c g = true) (hc : evalGuard env c = true) : evalGuard env g = true := by
+  have htop : GuardIR.simplifyUnder c g = .top := GuardIR.isTop_iff.mp h
+  have := evalGuard_simplifyUnder hc g
+  rw [htop] at this
+  exact this.symm
+
+/-- The exact backward image is sound for one concrete loop iteration. -/
+private theorem GuardIR.evalGuard_loopStep {accVar : VarId} {latch : Stmt} {g : GuardIR}
+    {env : Env} (h : evalGuard env (GuardIR.loopStep accVar latch g) = true) (val : Int) :
+    evalGuard (execStmt latch (updateEnv env accVar val)) g = true := by
+  have := evalGuard_havocGuardIR h val
+  rw [evalGuard_pullbackGuardIR] at this
+  exact this
+
+/-- Soundness of the closure test: `step` holds wherever `g` does. -/
+private theorem GuardIR.closedBy_sound {g step : GuardIR} {env : Env}
+    (h : GuardIR.closedBy g step = true) (hg : evalGuard env g = true) :
+    evalGuard env step = true := by
+  unfold GuardIR.closedBy at h
+  rcases Bool.or_eq_true_iff.mp h with h | h
+  · exact GuardIR.entails_sound h hg
+  · have := GuardIR.entails_sound (env := env) h (by rw [GuardIR.evalGuard_norm]; exact hg)
+    rw [GuardIR.evalGuard_norm] at this
+    exact this
+
+/-- A vanishing conservative residual means the guard is preserved by every iteration. -/
+private theorem GuardIR.backStep_sound {accVar : VarId} {latch : Stmt} {g : GuardIR}
+    (h : GuardIR.backStep accVar latch g = .top) (env : Env) (val : Int)
+    (hg : evalGuard env g = true) :
+    evalGuard (execStmt latch (updateEnv env accVar val)) g = true := by
+  have hn : evalGuard env (GuardIR.norm g) = true := by rw [GuardIR.evalGuard_norm]; exact hg
+  have := evalGuard_simplifyUnder hn
+    (GuardIR.norm (havocGuardIR accVar (Stmt.pullbackAll latch g)))
+  unfold GuardIR.backStep at h
+  rw [h, GuardIR.evalGuard_norm] at this
+  exact Stmt.evalGuard_pullbackAll latch g _ (evalGuard_havocGuardIR this.symm val)
+
+/-- Every result of the saturation implies its starting point and is preserved by every
+    concrete loop iteration. -/
+private theorem GuardIR.saturate_sound {accVar : VarId} {latch : Stmt} :
+    ∀ (fuel : Nat) (g inv : GuardIR), GuardIR.saturate accVar latch fuel g = some inv →
+      (∀ env, evalGuard env inv = true → evalGuard env g = true) ∧
+        ∀ env val, evalGuard env inv = true →
+          evalGuard (execStmt latch (updateEnv env accVar val)) inv = true := by
+  intro fuel
+  induction fuel with
+  | zero => intro g inv h; exact absurd h (by simp [GuardIR.saturate])
+  | succ fuel ih =>
+    intro g inv h
+    rw [GuardIR.saturate] at h
+    split at h
+    · next hr =>
+      have hinv : g = inv := Option.some.inj h
+      subst hinv
+      exact ⟨fun _ hg => hg, fun env val hg => GuardIR.backStep_sound hr env val hg⟩
+    · exact absurd h (by simp)
+    · have := ih _ inv h
+      refine ⟨fun env hinv => ?_, this.2⟩
+      have hc := this.1 env hinv
+      simp only [evalGuard, Bool.and_eq_true] at hc
+      exact hc.1
+
+/-- Concrete soundness of `strengthenLoopInvariantIR`: the result implies the target and is
+    preserved by every loop iteration, whatever value the body writes to the accumulator. -/
+private theorem strengthenLoopInvariantIR_sound {accVar : VarId} {latch : Stmt}
+    {target inv : GuardIR} (h : strengthenLoopInvariantIR accVar latch target = some inv) :
+    (∀ env, evalGuard env inv = true → evalGuard env target = true) ∧
+      ∀ env val, evalGuard env inv = true →
+        evalGuard (execStmt latch (updateEnv env accVar val)) inv = true := by
+  unfold strengthenLoopInvariantIR at h
+  simp only [] at h
+  split at h
+  · next hc =>
+    have hinv : target = inv := Option.some.inj h
+    subst hinv
+    exact ⟨fun _ hg => hg, fun env val hg =>
+      GuardIR.evalGuard_loopStep (GuardIR.closedBy_sound hc hg) val⟩
+  · split at h
+    · next hc =>
+      have hinv := Option.some.inj h
+      subst hinv
+      refine ⟨fun env hg => ?_, fun env val hg => ?_⟩
+      · simp only [evalGuard, Bool.and_eq_true] at hg
+        exact hg.1
+      · have hg' := hg
+        simp only [evalGuard, Bool.and_eq_true] at hg'
+        exact GuardIR.evalGuard_conj_intro (GuardIR.evalGuard_loopStep hg'.2 val)
+          (Stmt.evalGuard_pullbackAll latch _ _
+            (evalGuard_havocGuardIR (GuardIR.closedBy_sound hc hg) val))
+    · split at h
+      · next hc =>
+        have hinv := Option.some.inj h
+        subst hinv
+        refine ⟨fun env hg => ?_, fun env val hg =>
+          GuardIR.evalGuard_loopStep (GuardIR.closedBy_sound hc hg) val⟩
+        simp only [evalGuard, Bool.and_eq_true] at hg
+        exact hg.1
+      · exact GuardIR.saturate_sound _ _ _ h
+
+/-! ### Milestone 3 target theorems: havoc and inductive strengthening -/
+
+/-- Iterated State-Transfer Pullback Characterization: The `n`-fold `CFGTransfer.iterate` pullback
+    of `stateTransfer step` at `Q` and `s` holds if and only if `Q (step^[n] s)` holds. -/
+theorem stateTransfer_iterate_pullback_iff (step : S → S) (Q : S → Prop) (n : ℕ) (s : S) :
+    ((stateTransfer step).iterate n).pullback Q s ↔ Q (step^[n] s) := by
+  induction n generalizing Q with
+  | zero => exact Iff.rfl
+  | succ n ih =>
+    rw [Function.iterate_succ_apply']
+    exact ih (fun s' => Q (step s'))
+
+/-- Soundness of `havocGuardIR`: Denotation implies the semantic universal pullback `(havocTransfer v).pullback`. -/
+theorem havocGuardIR_sound (v : VarId) (g : GuardIR) :
+    denoteGuard (havocGuardIR v g) ≤ (havocTransfer v).pullback (denoteGuard g) := by
+  intro env h val
+  exact evalGuard_havocGuardIR h val
+
+/-- Exactness of `havocGuardIR` on Non-Mentioning Guards: When `guardMentionsVar v g = false`,
+    `havocGuardIR v g` denotes the exact semantic pullback `(havocTransfer v).pullback (denoteGuard g)`. -/
+theorem havocGuardIR_exact_of_nonMention (v : VarId) (g : GuardIR)
+    (h : guardMentionsVar v g = false) :
+    denoteGuard (havocGuardIR v g) = (havocTransfer v).pullback (denoteGuard g) := by
+  rw [havocGuardIR_of_not_mentions h]
+  funext env
+  apply propext
+  constructor
+  · intro hg val
+    show evalGuard (updateEnv env v val) g = true
+    rw [evalGuard_updateEnv_of_not_mentions h]
+    exact hg
+  · intro hall
+    have h0 : evalGuard (updateEnv env v 0) g = true := hall 0
+    rw [evalGuard_updateEnv_of_not_mentions h] at h0
+    exact h0
+
+/-- Categorical Inductive Soundness of `strengthenLoopInvariantIR`: Any synthesized `some inv`
+    satisfies `IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target)`. -/
+theorem strengthenLoopInvariantIR_inductive (accVar : VarId) (latch : Stmt)
+    (target inv : GuardIR) (h : strengthenLoopInvariantIR accVar latch target = some inv) :
+    IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target) := by
+  have hs := strengthenLoopInvariantIR_sound h
+  refine And.intro ?_ (fun env hinv => hs.1 env hinv)
+  rintro env' ⟨env₁, hstep, env, val, hupd, hinv⟩
+  subst hupd
+  subst hstep
+  exact hs.2 env val hinv
+
+/-! ### Guards that hold whenever a set of variables is non-zero
+
+The invariants found for the divisor-copying latches below are not always syntactically
+predictable (a branch condition is arbitrary), but they always belong to the following
+class, which is all that coverage and preheader discharge need. -/
+
+/-- `GuardIR.Pos P g`: `g` is built from `.top`, atoms `nonZero (var u)` with `P u`,
+    conjunctions, and implications with an arbitrary hypothesis. -/
+private inductive GuardIR.Pos (P : VarId → Prop) : GuardIR → Prop
+  | top : GuardIR.Pos P .top
+  | var {u : VarId} (hu : P u) : GuardIR.Pos P (.nonZero (.var u))
+  | conj {g h : GuardIR} (hg : GuardIR.Pos P g) (hh : GuardIR.Pos P h) :
+    GuardIR.Pos P (.conj g h)
+  | imp (a : GuardIR) {g : GuardIR} (hg : GuardIR.Pos P g) : GuardIR.Pos P (.imp a g)
+
+private theorem GuardIR.Pos.mono {P Q : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g)
+    (hPQ : ∀ u, P u → Q u) : GuardIR.Pos Q g := by
+  induction h with
+  | top => exact .top
+  | var hu => exact .var (hPQ _ hu)
+  | conj _ _ ihg ihh => exact .conj ihg ihh
+  | imp a _ ih => exact .imp a ih
+
+/-- A `Pos P` guard holds wherever every variable of `P` is non-zero. -/
+private theorem GuardIR.Pos.eval {P : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g)
+    {env : Env} (henv : ∀ u, P u → env u ≠ 0) : evalGuard env g = true := by
+  induction h with
+  | top => rfl
+  | var hu => exact decide_eq_true (henv _ hu)
+  | @conj g h _ _ ihg ihh =>
+    show (evalGuard env g && evalGuard env h) = true
+    rw [ihg, ihh]
+    rfl
+  | @imp a g _ ih =>
+    show (!evalGuard env a || evalGuard env g) = true
+    rw [ih]
+    exact Bool.or_true _
+
+private theorem GuardIR.Pos.mkConj {P : VarId → Prop} {a b : GuardIR}
+    (ha : GuardIR.Pos P a) (hb : GuardIR.Pos P b) : GuardIR.Pos P (GuardIR.mkConj a b) := by
+  unfold GuardIR.mkConj
+  split
+  · exact hb
+  · exact ha
+  · exact ha
+  · exact hb
+  · exact .conj ha hb
+
+private theorem GuardIR.Pos.mkImp {P : VarId → Prop} (a : GuardIR) {g : GuardIR}
+    (hg : GuardIR.Pos P g) : GuardIR.Pos P (GuardIR.mkImp a g) := by
+  unfold GuardIR.mkImp
+  split
+  · exact .top
+  · exact hg
+  · exact .top
+  · exact .imp a hg
+
+private theorem GuardIR.Pos.nf {P : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g) :
+    GuardIR.Pos P (GuardIR.nf g) := by
+  induction h with
+  | top => exact .top
+  | var hu => exact .var hu
+  | conj _ _ ihg ihh => exact GuardIR.Pos.mkConj ihg ihh
+  | imp a _ ih => exact GuardIR.Pos.mkImp _ ih
+
+private theorem GuardIR.Pos.impN {P : VarId → Prop} (a : GuardIR) {g : GuardIR}
+    (hg : GuardIR.Pos P g) : GuardIR.Pos P (GuardIR.impN a g) := by
+  unfold GuardIR.impN
+  split
+  · exact .top
+  · split
+    · cases hg
+    · exact GuardIR.Pos.mkImp a hg
+
+private theorem GuardIR.Pos.norm {P : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g) :
+    GuardIR.Pos P (GuardIR.norm g) := by
+  induction h with
+  | top => exact .top
+  | var hu => exact .var hu
+  | conj _ _ ihg ihh => exact GuardIR.Pos.mkConj ihg ihh
+  | imp a _ ih => exact GuardIR.Pos.impN _ ih
+
+/-- Copying `x` into `v`: afterwards the guard depends on `x` and on the old variables other
+    than `v`. -/
+private theorem GuardIR.Pos.subst_var {P : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g)
+    (v x : VarId) :
+    GuardIR.Pos (fun u => u = x ∨ (P u ∧ u ≠ v)) (GuardIR.subst v (.var x) g) := by
+  induction h with
+  | top => exact .top
+  | @var u hu =>
+    show GuardIR.Pos _ (.nonZero (if u = v then .var x else .var u))
+    split
+    · exact .var (Or.inl rfl)
+    · next hne => exact .var (Or.inr ⟨hu, hne⟩)
+  | conj _ _ ihg ihh => exact .conj ihg ihh
+  | imp a _ ih => exact .imp _ ih
+
+private theorem GuardIR.Pos.subst_closed {P : VarId → Prop} {g : GuardIR}
+    (h : GuardIR.Pos P g) (v : VarId) {x : VarId} (hx : P x) :
+    GuardIR.Pos P (GuardIR.subst v (.var x) g) :=
+  (h.subst_var v x).mono (fun _ hu => hu.elim (fun e => e ▸ hx) (fun h' => h'.1))
+
+private theorem GuardIR.Pos.subst_frame {P : VarId → Prop} {g : GuardIR}
+    (h : GuardIR.Pos P g) {v : VarId} (hv : ∀ u, P u → u ≠ v) (r : PureExpr) :
+    GuardIR.Pos P (GuardIR.subst v r g) := by
+  induction h with
+  | top => exact .top
+  | @var u hu =>
+    simp only [GuardIR.subst, PureExpr.subst, hv u hu, ↓reduceIte]
+    exact .var hu
+  | conj _ _ ihg ihh => exact .conj ihg ihh
+  | imp a _ ih => exact .imp _ ih
+
+private theorem GuardIR.Pos.branch {P : VarId → Prop} (c : GuardIR) {gt gf : GuardIR}
+    (ht : GuardIR.Pos P gt) (hf : GuardIR.Pos P gf) :
+    GuardIR.Pos P (GuardIR.branch c gt gf) := by
+  unfold GuardIR.branch
+  simp only []
+  split
+  · exact ht.norm
+  · exact GuardIR.Pos.mkConj (GuardIR.Pos.impN _ ht.norm) (GuardIR.Pos.impN _ hf.norm)
+
+/-- The exact precondition across a statement that writes no variable of `P` stays in the
+    class, whatever its branch conditions are. -/
+private theorem GuardIR.Pos.pullback_frame {P : VarId → Prop} {s : Stmt}
+    (hs : ∀ u, P u → stmtWritesVar u s = false) :
+    ∀ {g : GuardIR}, GuardIR.Pos P g → GuardIR.Pos P (pullbackGuardIR s g) := by
+  induction s with
+  | skip => intro g hg; exact hg
+  | assign v rhs =>
+    intro g hg
+    exact hg.subst_frame (fun u hu e => (of_decide_eq_false (hs u hu)) e.symm) rhs
+  | seq s₁ s₂ ih₁ ih₂ =>
+    intro g hg
+    exact ih₁ (fun u hu => (Bool.or_eq_false_iff.mp (hs u hu)).1)
+      (ih₂ (fun u hu => (Bool.or_eq_false_iff.mp (hs u hu)).2) hg)
+  | ite c t f iht ihf =>
+    intro g hg
+    exact GuardIR.Pos.branch c
+      (iht (fun u hu => (Bool.or_eq_false_iff.mp (hs u hu)).1) hg)
+      (ihf (fun u hu => (Bool.or_eq_false_iff.mp (hs u hu)).2) hg)
+
+private theorem GuardIR.Pos.havoc {P : VarId → Prop} {g : GuardIR} (h : GuardIR.Pos P g)
+    {v : VarId} (hv : ¬ P v) : GuardIR.Pos P (havocGuardIR v g) := by
+  induction h with
+  | top =>
+    rw [havocGuardIR_of_not_mentions rfl]
+    exact .top
+  | @var u hu =>
+    have hm : guardMentionsVar v (.nonZero (.var u)) = false :=
+      decide_eq_false (fun e => hv (e ▸ hu))
+    rw [havocGuardIR_of_not_mentions hm]
+    exact .var hu
+  | @conj g h hg hh ihg ihh =>
+    cases hm : guardMentionsVar v (.conj g h) with
+    | false =>
+      rw [havocGuardIR_of_not_mentions hm]
+      exact .conj hg hh
+    | true =>
+      rw [havocGuardIR, hm]
+      simp only [↓reduceIte]
+      exact GuardIR.Pos.mkConj ihg ihh
+  | @imp a g hg ih =>
+    cases hm : guardMentionsVar v (.imp a g) with
+    | false =>
+      rw [havocGuardIR_of_not_mentions hm]
+      exact .imp a hg
+    | true =>
+      rw [havocGuardIR, hm]
+      simp only [↓reduceIte]
+      split
+      · exact ih
+      · exact GuardIR.Pos.mkImp a ih
+
+/-- A `Pos P` target is discharged by any context in which every `nonZero (var u)`, `P u`, is
+    a hypothesis. -/
+private theorem GuardIR.Pos.residual_eq_top {P : VarId → Prop} {g : GuardIR}
+    (h : GuardIR.Pos P g) :
+    ∀ {c : GuardIR}, (∀ u, P u → GuardIR.hasHyp c (.nonZero (.var u)) = true) →
+      GuardIR.residual c g = .top := by
+  induction h with
+  | top => intro c _; rfl
+  | var hu =>
+    intro c hc
+    simp only [GuardIR.residual, hc _ hu, ↓reduceIte]
+  | @conj g h _ _ ihg ihh =>
+    intro c hc
+    have h₂ : GuardIR.residual (.conj c g) h = .top :=
+      ihh (fun u hu => by simp only [GuardIR.hasHyp, hc u hu, Bool.true_or])
+    simp only [GuardIR.residual, ihg hc, h₂]
+    rfl
+  | @imp a g _ ih =>
+    intro c hc
+    have h₂ : GuardIR.residual (.conj c a) g = .top :=
+      ih (fun u hu => by simp only [GuardIR.hasHyp, hc u hu, Bool.true_or])
+    simp only [GuardIR.residual, h₂, GuardIR.mkImp_top_right, ite_self]
+
+/-- Preheader discharge: a `Pos Q` guard is entailed, after normalisation, by any context
+    that lists `nonZero (var u)` for every `Q u` among its hypotheses. -/
+private theorem synthesizeGuardIR_norm_eq_top_of_pos {Q : VarId → Prop} {ctx g : GuardIR}
+    (hg : GuardIR.Pos Q g)
+    (hctx : ∀ u, Q u →
+      GuardIR.hasHyp (GuardIR.nf (GuardIR.norm ctx)) (.nonZero (.var u)) = true) :
+    synthesizeGuardIR (GuardIR.norm ctx) (GuardIR.norm g) = .top := by
+  have hres : GuardIR.simplifyUnder (GuardIR.norm ctx) (GuardIR.norm g) = .top :=
+    hg.norm.nf.residual_eq_top hctx
+  unfold synthesizeGuardIR
+  rw [hres]
+
+private theorem hoistLoopGuardIR_assign1_of_pos {d : VarId} {inv : GuardIR}
+    (hinv : GuardIR.Pos (fun u => u = d) inv) (x : VarId) :
+    hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top := by
+  have hp : GuardIR.Pos (fun u => u = x) (pullbackGuardIR (.assign d (.var x)) inv) :=
+    (hinv.subst_var d x).mono (fun u hu => hu.elim id (fun h => absurd h.1 h.2))
+  refine synthesizeGuardIR_norm_eq_top_of_pos hp (fun u hu => ?_)
+  subst hu
+  exact decide_eq_true rfl
+
+private theorem hoistLoopGuardIR_assign2_of_pos {d e : VarId} {inv : GuardIR}
+    (hinv : GuardIR.Pos (fun u => u = d ∨ u = e) inv) (x z : VarId) :
+    hoistLoopGuardIR (.seq (.assign d (.var x)) (.assign e (.var z)))
+      (.conj (.nonZero (.var x)) (.nonZero (.var z))) inv = .top := by
+  have hp : GuardIR.Pos (fun u => u = x ∨ u = z)
+      (pullbackGuardIR (.seq (.assign d (.var x)) (.assign e (.var z))) inv) :=
+    ((hinv.subst_var e z).subst_var d x).mono (by
+      rintro u (hu | ⟨hu | ⟨hu | hu, hne⟩, hne'⟩)
+      · exact Or.inl hu
+      · exact Or.inr hu
+      · exact absurd hu hne'
+      · exact absurd hu hne)
+  refine synthesizeGuardIR_norm_eq_top_of_pos hp (fun u hu => ?_)
+  show (decide (GuardIR.nonZero (.var x) = GuardIR.nonZero (.var u)) ||
+    decide (GuardIR.nonZero (.var z) = GuardIR.nonZero (.var u))) = true
+  rcases hu with rfl | rfl
+  · rw [decide_eq_true rfl]; rfl
+  · rw [decide_eq_true (rfl : GuardIR.nonZero (.var u) = GuardIR.nonZero (.var u))]
+    exact Bool.or_true _
+
+private theorem hoistLoopGuardIR_assign3_of_pos {d d₁ d₂ : VarId} {inv : GuardIR}
+    (hinv : GuardIR.Pos (fun u => u = d ∨ u = d₁ ∨ u = d₂) inv) (x w z : VarId) :
+    hoistLoopGuardIR
+      (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+      (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+      inv = .top := by
+  have hp : GuardIR.Pos (fun u => u = x ∨ u = w ∨ u = z)
+      (pullbackGuardIR
+        (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z)))) inv) :=
+    (((hinv.subst_var d₂ z).subst_var d₁ w).subst_var d x).mono (by
+      rintro u (hu | ⟨hu | ⟨hu | ⟨hu | hu | hu, hne₂⟩, hne₁⟩, hne⟩)
+      · exact Or.inl hu
+      · exact Or.inr (Or.inl hu)
+      · exact Or.inr (Or.inr hu)
+      · exact absurd hu hne
+      · exact absurd hu hne₁
+      · exact absurd hu hne₂)
+  refine synthesizeGuardIR_norm_eq_top_of_pos hp (fun u hu => ?_)
+  show (decide (GuardIR.nonZero (.var x) = GuardIR.nonZero (.var u)) ||
+    (decide (GuardIR.nonZero (.var w) = GuardIR.nonZero (.var u)) ||
+      decide (GuardIR.nonZero (.var z) = GuardIR.nonZero (.var u)))) = true
+  rcases hu with rfl | rfl | rfl
+  · rw [decide_eq_true rfl]; rfl
+  · rw [decide_eq_true (rfl : GuardIR.nonZero (.var u) = GuardIR.nonZero (.var u))]
+    simp only [Bool.true_or, Bool.or_true]
+  · rw [decide_eq_true (rfl : GuardIR.nonZero (.var u) = GuardIR.nonZero (.var u))]
+    simp only [Bool.or_true]
+
+/-! ### Strengthening on divisor-copying latches -/
+
+/-- Across a statement that does not write `d`, the exact precondition of `nonZero (var d)`
+    is the guard itself. -/
+private theorem pullbackGuardIR_nonZero_var_of_not_writes {d : VarId} {s : Stmt}
+    (h : stmtWritesVar d s = false) :
+    pullbackGuardIR s (.nonZero (.var d)) = .nonZero (.var d) := by
+  induction s with
+  | skip => rfl
+  | assign v rhs =>
+    have hv : ¬ d = v := fun e => (of_decide_eq_false h) e.symm
+    simp only [pullbackGuardIR, GuardIR.subst, PureExpr.subst, hv, ↓reduceIte]
+  | seq s₁ s₂ ih₁ ih₂ =>
+    have h' := Bool.or_eq_false_iff.mp (h : (stmtWritesVar d s₁ || stmtWritesVar d s₂) = false)
+    rw [pullbackGuardIR, ih₂ h'.2, ih₁ h'.1]
+  | ite c t f iht ihf =>
+    have h' := Bool.or_eq_false_iff.mp (h : (stmtWritesVar d t || stmtWritesVar d f) = false)
+    rw [pullbackGuardIR, iht h'.1, ihf h'.2]
+    simp only [GuardIR.branch, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, ↓reduceIte]
+
+/-- A divisor that the latch never writes is its own inductive invariant. -/
+private theorem strengthenLoopInvariantIR_frame {accVar d : VarId} {latch : Stmt}
+    (hda : d ≠ accVar) (hw : stmtWritesVar d latch = false) :
+    strengthenLoopInvariantIR accVar latch (.nonZero (.var d)) = some (.nonZero (.var d)) := by
+  have hstep : GuardIR.loopStep accVar latch (.nonZero (.var d)) = .nonZero (.var d) := by
+    unfold GuardIR.loopStep
+    rw [pullbackGuardIR_nonZero_var_of_not_writes hw]
+    exact havocGuardIR_of_not_mentions (decide_eq_false hda)
+  have hclosed : GuardIR.closedBy (.nonZero (.var d)) (.nonZero (.var d)) = true := by
+    unfold GuardIR.closedBy
+    rw [GuardIR.entails_self]
+    rfl
+  unfold strengthenLoopInvariantIR
+  simp only [hstep, hclosed, ↓reduceIte]
+
+/-- If the target, its exact backward image and the result of the saturation all stay in
+    `Pos P`, so does whatever `strengthenLoopInvariantIR` returns. -/
+private theorem strengthenLoopInvariantIR_pos {P : VarId → Prop} {accVar : VarId}
+    {latch : Stmt} {target : GuardIR} (htarget : GuardIR.Pos P target)
+    (hstep : GuardIR.Pos P (pullbackGuardIR latch target)) (hacc : ¬ P accVar)
+    (hsat : ∃ inv, GuardIR.saturate accVar latch 8 target = some inv ∧ GuardIR.Pos P inv) :
+    ∃ inv, strengthenLoopInvariantIR accVar latch target = some inv ∧ GuardIR.Pos P inv := by
+  unfold strengthenLoopInvariantIR
+  simp only []
+  split
+  · exact ⟨target, rfl, htarget⟩
+  · split
+    · exact ⟨_, rfl, .conj htarget (hstep.havoc hacc)⟩
+    · split
+      · exact ⟨_, rfl, .conj htarget (hstep.havoc hacc)⟩
+      · exact hsat
+
+/-- The conservative precondition across a statement that writes no variable the guard
+    mentions is the guard itself. -/
+private theorem Stmt.pullbackAll_of_not_writes {s : Stmt} {g : GuardIR}
+    (h : ∀ v, guardMentionsVar v g = true → stmtWritesVar v s = false) :
+    Stmt.pullbackAll s g = g := by
+  induction s with
+  | skip => rfl
+  | assign v rhs =>
+    show GuardIR.subst v rhs g = g
+    refine GuardIR.subst_of_not_mentions rhs ?_
+    cases hm : guardMentionsVar v g with
+    | false => rfl
+    | true => exact absurd rfl (of_decide_eq_false (h v hm))
+  | seq s₁ s₂ ih₁ ih₂ =>
+    rw [Stmt.pullbackAll, ih₂ (fun v hv => (Bool.or_eq_false_iff.mp (h v hv)).2),
+      ih₁ (fun v hv => (Bool.or_eq_false_iff.mp (h v hv)).1)]
+  | ite c t f iht ihf =>
+    rw [Stmt.pullbackAll, iht (fun v hv => (Bool.or_eq_false_iff.mp (h v hv)).1),
+      ihf (fun v hv => (Bool.or_eq_false_iff.mp (h v hv)).2)]
+    unfold GuardIR.join
+    simp only [↓reduceIte]
+
+/-- Conjunctions of atoms `nonZero (var u)` with `P u`: the shape of the invariants that
+    the saturation builds on divisor-copying latches. -/
+private inductive GuardIR.NZTree (P : VarId → Prop) : GuardIR → Prop
+  | var {u : VarId} (hu : P u) : GuardIR.NZTree P (.nonZero (.var u))
+  | conj {g h : GuardIR} (hg : GuardIR.NZTree P g) (hh : GuardIR.NZTree P h) :
+    GuardIR.NZTree P (.conj g h)
+
+private theorem GuardIR.NZTree.mentions {P : VarId → Prop} {g : GuardIR}
+    (h : GuardIR.NZTree P g) {v : VarId} (hv : guardMentionsVar v g = true) : P v := by
+  induction h with
+  | @var u hu => exact (of_decide_eq_true hv : u = v) ▸ hu
+  | @conj g h _ _ ihg ihh =>
+    rcases Bool.or_eq_true_iff.mp (hv : (guardMentionsVar v g || guardMentionsVar v h) = true)
+      with hv' | hv'
+    · exact ihg hv'
+    · exact ihh hv'
+
+private theorem GuardIR.NZTree.pullbackAll_frame {P : VarId → Prop} {s : Stmt} {g : GuardIR}
+    (hs : ∀ v, P v → stmtWritesVar v s = false) (h : GuardIR.NZTree P g) :
+    Stmt.pullbackAll s g = g :=
+  Stmt.pullbackAll_of_not_writes (fun _ hv => hs _ (h.mentions hv))
+
+private theorem GuardIR.NZTree.havoc {P : VarId → Prop} {g : GuardIR}
+    (h : GuardIR.NZTree P g) {v : VarId} (hv : ¬ P v) : havocGuardIR v g = g := by
+  apply havocGuardIR_of_not_mentions
+  cases hm : guardMentionsVar v g with
+  | false => rfl
+  | true => exact absurd (h.mentions hm) hv
+
+private theorem GuardIR.saturate_of_top {accVar : VarId} {latch : Stmt} {g : GuardIR} (k : Nat)
+    (h : GuardIR.backStep accVar latch g = .top) :
+    GuardIR.saturate accVar latch (k + 1) g = some g := by
+  rw [GuardIR.saturate, h]
+
+private theorem GuardIR.saturate_of_nonZero {accVar : VarId} {latch : Stmt} {g : GuardIR}
+    (k : Nat) {e : PureExpr} (h : GuardIR.backStep accVar latch g = .nonZero e) :
+    GuardIR.saturate accVar latch (k + 1) g =
+      GuardIR.saturate accVar latch k (.conj g (.nonZero e)) := by
+  rw [GuardIR.saturate, h]
+
+private theorem GuardIR.saturate_of_conj {accVar : VarId} {latch : Stmt} {g : GuardIR}
+    (k : Nat) {a b : GuardIR} (h : GuardIR.backStep accVar latch g = .conj a b) :
+    GuardIR.saturate accVar latch (k + 1) g =
+      GuardIR.saturate accVar latch k (.conj g (.conj a b)) := by
+  rw [GuardIR.saturate, h]
+
+/-- Two-stage pipeline `d := nextD; i := stepRhs`: the invariant is `d ≠ 0 ∧ nextD ≠ 0`, or
+    in any case a guard over these two variables. -/
+private theorem strengthenLoopInvariantIR_pipeline_pos (accVar d nextD i : VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) (stepRhs : PureExpr) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.nonZero (.var d)) = some inv ∧
+      GuardIR.Pos (fun u => u = d ∨ u = nextD) inv := by
+  have hb1 : GuardIR.backStep accVar (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+      (.nonZero (.var d)) = .nonZero (.var nextD) := by
+    have hpb : Stmt.pullbackAll (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.nonZero (.var d)) = .nonZero (.var nextD) := by
+      simp [Stmt.pullbackAll, GuardIR.subst, PureExpr.subst, hdi]
+    unfold GuardIR.backStep
+    rw [hpb, havocGuardIR_of_not_mentions (v := accVar) (g := .nonZero (.var nextD))
+      (decide_eq_false hna)]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, GuardIR.nf,
+      GuardIR.residual, GuardIR.hasHyp, hdn]
+  have hb2 : GuardIR.backStep accVar (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+      (.conj (.nonZero (.var d)) (.nonZero (.var nextD))) = .top := by
+    have hpb : Stmt.pullbackAll (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.conj (.nonZero (.var d)) (.nonZero (.var nextD))) =
+        .conj (.nonZero (.var nextD)) (.nonZero (.var nextD)) := by
+      simp [Stmt.pullbackAll, GuardIR.subst, PureExpr.subst, hdi, hni, Ne.symm hdn]
+    have hm : guardMentionsVar accVar
+        (.conj (.nonZero (.var nextD)) (.nonZero (.var nextD))) = false := by
+      simp [guardMentionsVar, pureMentionsVar, hna]
+    unfold GuardIR.backStep
+    rw [hpb, havocGuardIR_of_not_mentions hm]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp]
+  refine strengthenLoopInvariantIR_pos (.var (Or.inl rfl)) ?_ ?_
+    ⟨_, ?_, .conj (.var (Or.inl rfl)) (.var (Or.inr rfl))⟩
+  · exact (GuardIR.Pos.subst_frame (.var (Or.inl rfl))
+      (fun u hu => by rcases hu with rfl | rfl; exact hdi; exact hni) stepRhs).subst_closed d
+        (Or.inr rfl)
+  · rintro (h | h)
+    · exact hda h.symm
+    · exact hna h.symm
+  · exact (GuardIR.saturate_of_nonZero 7 hb1).trans (GuardIR.saturate_of_top 6 hb2)
+
+/-- Swap latch `preLatch; tmp := d; d := altD; altD := tmp; postLatch`: the invariant is
+    `d ≠ 0 ∧ altD ≠ 0`, or in any case a guard over these two variables. -/
+private theorem strengthenLoopInvariantIR_swap_pos (accVar d altD tmp : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hala : altD ≠ accVar)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreAlt : stmtWritesVar altD preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostAlt : stmtWritesVar altD postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign tmp (.var d))
+            (.seq (.assign d (.var altD))
+              (.seq (.assign altD (.var tmp)) postLatch))))
+        (.nonZero (.var d)) = some inv ∧
+      GuardIR.Pos (fun u => u = d ∨ u = altD) inv := by
+  have hPre : ∀ v, (fun u => u = d ∨ u = altD) v → stmtWritesVar v preLatch = false := by
+    rintro v (rfl | rfl) <;> assumption
+  have hPost : ∀ v, (fun u => u = d ∨ u = altD) v → stmtWritesVar v postLatch = false := by
+    rintro v (rfl | rfl) <;> assumption
+  have hacc : ¬ (fun u => u = d ∨ u = altD) accVar := by
+    rintro (h | h)
+    · exact hda h.symm
+    · exact hala h.symm
+  have hhav : ∀ {g : GuardIR}, GuardIR.NZTree (fun u => u = d ∨ u = altD) g →
+      havocGuardIR accVar g = g := fun h => h.havoc hacc
+  have hpb : ∀ g : GuardIR,
+      Stmt.pullbackAll
+        (.seq preLatch
+          (.seq (.assign tmp (.var d))
+            (.seq (.assign d (.var altD))
+              (.seq (.assign altD (.var tmp)) postLatch)))) g =
+      Stmt.pullbackAll preLatch
+        (GuardIR.subst tmp (.var d)
+          (GuardIR.subst d (.var altD)
+            (GuardIR.subst altD (.var tmp) (Stmt.pullbackAll postLatch g)))) := fun _ => rfl
+  have hb1 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.assign tmp (.var d))
+          (.seq (.assign d (.var altD))
+            (.seq (.assign altD (.var tmp)) postLatch))))
+      (.nonZero (.var d)) = .nonZero (.var altD) := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost (.var (Or.inl rfl))]
+    simp only [GuardIR.subst, PureExpr.subst, hdal, halt, ↓reduceIte]
+    rw [GuardIR.NZTree.pullbackAll_frame hPre (.var (Or.inr rfl)),
+      hhav (.var (Or.inr rfl))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, GuardIR.nf,
+      GuardIR.residual, GuardIR.hasHyp, hdal]
+  have hb2 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.assign tmp (.var d))
+          (.seq (.assign d (.var altD))
+            (.seq (.assign altD (.var tmp)) postLatch))))
+      (.conj (.nonZero (.var d)) (.nonZero (.var altD))) = .top := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost (.conj (.var (Or.inl rfl)) (.var (Or.inr rfl)))]
+    simp only [GuardIR.subst, PureExpr.subst, hdal, halt, Ne.symm hdt, ↓reduceIte]
+    rw [GuardIR.NZTree.pullbackAll_frame hPre (.conj (.var (Or.inr rfl)) (.var (Or.inl rfl))),
+      hhav (.conj (.var (Or.inr rfl)) (.var (Or.inl rfl)))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp]
+  refine strengthenLoopInvariantIR_pos (.var (Or.inl rfl)) ?_ hacc
+    ⟨_, (GuardIR.saturate_of_nonZero 7 hb1).trans (GuardIR.saturate_of_top 6 hb2),
+      .conj (.var (Or.inl rfl)) (.var (Or.inr rfl))⟩
+  refine GuardIR.Pos.pullback_frame hPre ?_
+  refine ((((GuardIR.Pos.pullback_frame hPost (.var (Or.inl rfl))).subst_var altD tmp).subst_var
+    d altD).subst_var tmp d).mono ?_
+  rintro u (hu | ⟨hu | ⟨hu | ⟨hu | hu, hne₁⟩, hne₂⟩, hne₃⟩)
+  · exact Or.inl hu
+  · exact Or.inr hu
+  · exact absurd hu hne₃
+  · exact absurd hu hne₂
+  · exact absurd hu hne₁
+
+/-- Three-stage pipeline `preLatch; d := d₁; d₁ := d₂; postLatch`: two backward steps reach
+    `d ≠ 0 ∧ d₁ ≠ 0 ∧ d₂ ≠ 0`; in any case the invariant is a guard over these variables. -/
+private theorem strengthenLoopInvariantIR_pipeline3_pos (accVar d d₁ d₂ : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign d (.var d₁))
+            (.seq (.assign d₁ (.var d₂)) postLatch)))
+        (.nonZero (.var d)) = some inv ∧
+      GuardIR.Pos (fun u => u = d ∨ u = d₁ ∨ u = d₂) inv := by
+  have hPre : ∀ v, (fun u => u = d ∨ u = d₁ ∨ u = d₂) v →
+      stmtWritesVar v preLatch = false := by
+    rintro v (rfl | rfl | rfl) <;> assumption
+  have hPost : ∀ v, (fun u => u = d ∨ u = d₁ ∨ u = d₂) v →
+      stmtWritesVar v postLatch = false := by
+    rintro v (rfl | rfl | rfl) <;> assumption
+  have hacc : ¬ (fun u => u = d ∨ u = d₁ ∨ u = d₂) accVar := by
+    rintro (h | h | h)
+    · exact hda h.symm
+    · exact hd₁a h.symm
+    · exact hd₂a h.symm
+  have hhav : ∀ {g : GuardIR}, GuardIR.NZTree (fun u => u = d ∨ u = d₁ ∨ u = d₂) g →
+      havocGuardIR accVar g = g := fun h => h.havoc hacc
+  have hpb : ∀ g : GuardIR,
+      Stmt.pullbackAll
+        (.seq preLatch
+          (.seq (.assign d (.var d₁))
+            (.seq (.assign d₁ (.var d₂)) postLatch))) g =
+      Stmt.pullbackAll preLatch
+        (GuardIR.subst d (.var d₁)
+          (GuardIR.subst d₁ (.var d₂) (Stmt.pullbackAll postLatch g))) := fun _ => rfl
+  have hb1 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.assign d (.var d₁))
+          (.seq (.assign d₁ (.var d₂)) postLatch)))
+      (.nonZero (.var d)) = .nonZero (.var d₁) := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost (.var (Or.inl rfl))]
+    simp only [GuardIR.subst, PureExpr.subst, hdd₁, ↓reduceIte]
+    rw [GuardIR.NZTree.pullbackAll_frame hPre (.var (Or.inr (Or.inl rfl))),
+      hhav (.var (Or.inr (Or.inl rfl)))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, GuardIR.nf,
+      GuardIR.residual, GuardIR.hasHyp, hdd₁]
+  have hb2 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.assign d (.var d₁))
+          (.seq (.assign d₁ (.var d₂)) postLatch)))
+      (.conj (.nonZero (.var d)) (.nonZero (.var d₁))) = .nonZero (.var d₂) := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost
+      (.conj (.var (Or.inl rfl)) (.var (Or.inr (Or.inl rfl))))]
+    simp only [GuardIR.subst, PureExpr.subst, hdd₁, Ne.symm hdd₂, ↓reduceIte]
+    rw [GuardIR.NZTree.pullbackAll_frame hPre
+        (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl)))),
+      hhav
+        (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl))))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp, hdd₂, hd₁d₂]
+  have hb3 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.assign d (.var d₁))
+          (.seq (.assign d₁ (.var d₂)) postLatch)))
+      (.conj (.conj (.nonZero (.var d)) (.nonZero (.var d₁))) (.nonZero (.var d₂))) = .top := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost
+      (.conj (.conj (.var (Or.inl rfl)) (.var (Or.inr (Or.inl rfl))))
+        (.var (Or.inr (Or.inr rfl))))]
+    simp only [GuardIR.subst, PureExpr.subst, hdd₁, Ne.symm hdd₂, Ne.symm hd₁d₂, ↓reduceIte]
+    rw [GuardIR.NZTree.pullbackAll_frame hPre
+        (.conj (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl))))
+          (.var (Or.inr (Or.inr rfl)))),
+      hhav
+        (.conj (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl))))
+          (.var (Or.inr (Or.inr rfl))))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp]
+  refine strengthenLoopInvariantIR_pos (.var (Or.inl rfl)) ?_ hacc
+    ⟨_, ((GuardIR.saturate_of_nonZero 7 hb1).trans (GuardIR.saturate_of_nonZero 6 hb2)).trans
+        (GuardIR.saturate_of_top 5 hb3),
+      .conj (.conj (.var (Or.inl rfl)) (.var (Or.inr (Or.inl rfl))))
+        (.var (Or.inr (Or.inr rfl)))⟩
+  exact GuardIR.Pos.pullback_frame hPre
+    (((GuardIR.Pos.pullback_frame hPost (.var (Or.inl rfl))).subst_closed d₁
+      (Or.inr (Or.inr rfl))).subst_closed d (Or.inr (Or.inl rfl)))
+
+/-- Branching latch `preLatch; if branchCond { d := d₁ } else { d := d₂ }; postLatch`, for
+    an arbitrary branch condition: the path-insensitive join reaches
+    `d ≠ 0 ∧ d₁ ≠ 0 ∧ d₂ ≠ 0`; in any case the invariant is a guard over these variables. -/
+private theorem strengthenLoopInvariantIR_ite_branch_pos (accVar d d₁ d₂ : VarId)
+    (branchCond : GuardIR) (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+        (.nonZero (.var d)) = some inv ∧
+      GuardIR.Pos (fun u => u = d ∨ u = d₁ ∨ u = d₂) inv := by
+  have hPre : ∀ v, (fun u => u = d ∨ u = d₁ ∨ u = d₂) v →
+      stmtWritesVar v preLatch = false := by
+    rintro v (rfl | rfl | rfl) <;> assumption
+  have hPost : ∀ v, (fun u => u = d ∨ u = d₁ ∨ u = d₂) v →
+      stmtWritesVar v postLatch = false := by
+    rintro v (rfl | rfl | rfl) <;> assumption
+  have hacc : ¬ (fun u => u = d ∨ u = d₁ ∨ u = d₂) accVar := by
+    rintro (h | h | h)
+    · exact hda h.symm
+    · exact hd₁a h.symm
+    · exact hd₂a h.symm
+  have hhav : ∀ {g : GuardIR}, GuardIR.NZTree (fun u => u = d ∨ u = d₁ ∨ u = d₂) g →
+      havocGuardIR accVar g = g := fun h => h.havoc hacc
+  have hpb : ∀ g : GuardIR,
+      Stmt.pullbackAll
+        (.seq preLatch
+          (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch)) g =
+      Stmt.pullbackAll preLatch
+        (GuardIR.join (GuardIR.subst d (.var d₁) (Stmt.pullbackAll postLatch g))
+          (GuardIR.subst d (.var d₂) (Stmt.pullbackAll postLatch g))) := fun _ => rfl
+  have hb1 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+      (.nonZero (.var d)) = .conj (.nonZero (.var d₁)) (.nonZero (.var d₂)) := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost (.var (Or.inl rfl))]
+    have hj : GuardIR.join (GuardIR.subst d (.var d₁) (.nonZero (.var d)))
+        (GuardIR.subst d (.var d₂) (.nonZero (.var d))) =
+        .conj (.nonZero (.var d₁)) (.nonZero (.var d₂)) := by
+      simp [GuardIR.join, GuardIR.size, GuardIR.subst, PureExpr.subst, GuardIR.mkConj,
+        GuardIR.residual, GuardIR.hasHyp, hd₁d₂]
+    rw [hj, GuardIR.NZTree.pullbackAll_frame hPre
+        (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl)))),
+      hhav
+        (.conj (.var (Or.inr (Or.inl rfl))) (.var (Or.inr (Or.inr rfl))))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp, hdd₁, hdd₂, hd₁d₂]
+  have hb2 : GuardIR.backStep accVar
+      (.seq preLatch
+        (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+      (.conj (.nonZero (.var d)) (.conj (.nonZero (.var d₁)) (.nonZero (.var d₂)))) = .top := by
+    unfold GuardIR.backStep
+    rw [hpb, GuardIR.NZTree.pullbackAll_frame hPost
+      (.conj (.var (Or.inl rfl)) (.conj (.var (Or.inr (Or.inl rfl)))
+        (.var (Or.inr (Or.inr rfl)))))]
+    have hj : GuardIR.join
+        (GuardIR.subst d (.var d₁)
+          (.conj (.nonZero (.var d)) (.conj (.nonZero (.var d₁)) (.nonZero (.var d₂)))))
+        (GuardIR.subst d (.var d₂)
+          (.conj (.nonZero (.var d)) (.conj (.nonZero (.var d₁)) (.nonZero (.var d₂))))) =
+        .conj (.nonZero (.var d₁)) (.conj (.nonZero (.var d₁)) (.nonZero (.var d₂))) := by
+      simp [GuardIR.join, GuardIR.size, GuardIR.subst, PureExpr.subst, GuardIR.mkConj,
+        GuardIR.residual, GuardIR.hasHyp, hd₁d₂, Ne.symm hdd₁, Ne.symm hdd₂]
+    rw [hj, GuardIR.NZTree.pullbackAll_frame hPre
+        (.conj (.var (Or.inr (Or.inl rfl))) (.conj (.var (Or.inr (Or.inl rfl)))
+          (.var (Or.inr (Or.inr rfl))))),
+      hhav
+        (.conj (.var (Or.inr (Or.inl rfl))) (.conj (.var (Or.inr (Or.inl rfl)))
+          (.var (Or.inr (Or.inr rfl)))))]
+    simp [GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero,
+      GuardIR.mkConj, GuardIR.nf, GuardIR.residual, GuardIR.hasHyp]
+  refine strengthenLoopInvariantIR_pos (.var (Or.inl rfl)) ?_ hacc
+    ⟨_, (GuardIR.saturate_of_conj 7 hb1).trans (GuardIR.saturate_of_top 6 hb2),
+      .conj (.var (Or.inl rfl)) (.conj (.var (Or.inr (Or.inl rfl)))
+        (.var (Or.inr (Or.inr rfl))))⟩
+  exact GuardIR.Pos.pullback_frame hPre
+    (GuardIR.Pos.branch branchCond
+      ((GuardIR.Pos.pullback_frame hPost (.var (Or.inl rfl))).subst_closed d
+        (Or.inr (Or.inl rfl)))
+      ((GuardIR.Pos.pullback_frame hPost (.var (Or.inl rfl))).subst_closed d
+        (Or.inr (Or.inr rfl))))
+
+/-! ### Milestone 3 target theorems: strengthening completeness and preheader hoisting -/
+
+/-- Stationary Divisor Strengthening Completeness: When `d` is distinct from `accVar` and `i`,
+    `strengthenLoopInvariantIR` succeeds on `i := i - 1` for `.nonZero (.var d)`. -/
+theorem strengthenLoopInvariantIR_stationary (accVar d i : VarId)
+    (hda : d ≠ accVar) (hdi : d ≠ i) :
+    ∃ inv, strengthenLoopInvariantIR accVar (.assign i (.sub (.var i) (.lit 1))) (.nonZero (.var d)) = some inv := by
+  exact ⟨_, strengthenLoopInvariantIR_frame hda (decide_eq_false (Ne.symm hdi))⟩
+
+/-- Two-Stage Pipeline Divisor Strengthening Completeness: Across `d := nextD; i := i - 1`,
+    `strengthenLoopInvariantIR` strengthens `.nonZero (.var d)` to a genuine inductive invariant `some inv`. -/
+theorem strengthenLoopInvariantIR_pipeline (accVar d nextD i : VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i (.sub (.var i) (.lit 1))))
+        (.nonZero (.var d)) = some inv := by
+  obtain ⟨inv, h, _⟩ := strengthenLoopInvariantIR_pipeline_pos accVar d nextD i hda hna hdi hni hdn
+    (.sub (.var i) (.lit 1))
+  exact ⟨inv, h⟩
+
+/-- Categorical Realization of `hoistLoopGuardIR`: Denotation commutes with abstract `hoistLoopGuard`
+    along `stateTransfer (execStmt init)`. -/
+theorem hoistLoopGuardIR_denote (init : Stmt) (ctx inv : GuardIR) :
+    denoteGuard (hoistLoopGuardIR init ctx inv) =
+      hoistLoopGuard (stateTransfer (execStmt init)) (denoteGuard ctx) (denoteGuard inv) := by
+  exact synthesizeStmtGuardIR_denote init ctx inv
+
+/-- Arbitrary-Iteration Target Soundness of `hoistLoopGuardIR`: Given an inductive invariant `inv`
+    for `target` under `loopStepTransfer accVar latch`, conjoining `ctx` with `hoistLoopGuardIR init ctx inv`
+    establishes `target` after `init` and `n` abstract loop iterations for every `n : ℕ`. -/
+theorem hoistLoopGuardIR_iterate_target (init : Stmt) (accVar : VarId) (latch : Stmt)
+    (ctx target inv : GuardIR)
+    (hInd : IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target))
+    (n : ℕ) :
+    (((stateTransfer (execStmt init)).comp ((loopStepTransfer accVar latch).iterate n)).post
+      (denoteGuard ctx ⊓ denoteGuard (hoistLoopGuardIR init ctx inv))) ≤ denoteGuard target := by
+  rw [hoistLoopGuardIR_denote]
+  exact hoistLoopGuard_iterate_target (stateTransfer (execStmt init))
+    (loopStepTransfer accVar latch) (denoteGuard ctx) (denoteGuard inv) (denoteGuard target)
+    hInd n
+
+/-! ### Soundness of the loop optimizer -/
+
+private theorem WhileLoop.withFacts_cond (F : GuardIR) (w : WhileLoop) :
+    (w.withFacts F).cond = w.cond := rfl
+
+private theorem WhileLoop.withFacts_accVar (F : GuardIR) (w : WhileLoop) :
+    (w.withFacts F).accVar = w.accVar := rfl
+
+private theorem WhileLoop.withFacts_latch (F : GuardIR) (w : WhileLoop) :
+    (w.withFacts F).latch = w.latch := rfl
+
+/-- `optimizeBlock` on a block without statements is `optimizeExpr` under the entailed facts;
+    it preserves the value of the expression wherever the context holds. -/
+private theorem evalExpr_optimizeBlock_skip {ctx : GuardIR} {e : Expr} {env : Env}
+    (h : evalGuard env ctx = true) :
+    evalExpr env (optimizeBlock ctx { body := .skip, ret := e }).ret = evalExpr env e :=
+  optimizeBlock_sound ctx { body := .skip, ret := e } env h
+
+/-- If an invariant that implies the facts `F` holds at the loop header and is preserved by
+    every iteration, the loop rewritten under `F` runs exactly like the original. -/
+private theorem WhileLoop.runWhileSteps_withFacts {w : WhileLoop} {F inv : GuardIR}
+    (hF : ∀ env, evalGuard env inv = true → evalGuard env F = true)
+    (hstep : ∀ env val, evalGuard env inv = true →
+      evalGuard (execStmt w.latch (updateEnv env w.accVar val)) inv = true) :
+    ∀ (fuel : Nat) (env : Env), evalGuard env inv = true →
+      runWhileSteps fuel env (w.withFacts F) = runWhileSteps fuel env w := by
+  intro fuel
+  induction fuel with
+  | zero => intro env _; rfl
+  | succ fuel ih =>
+    intro env hinv
+    have hFenv := hF env hinv
+    cases hc : evalGuard env w.cond with
+    | true =>
+      have hb : evalExpr env (w.withFacts F).body = evalExpr env w.body :=
+        evalExpr_optimizeBlock_skip (GuardIR.evalGuard_conj_intro hFenv hc)
+      simp only [runWhileSteps, WhileLoop.withFacts_cond, WhileLoop.withFacts_accVar,
+        WhileLoop.withFacts_latch, hc, hb, ↓reduceIte]
+      cases evalExpr env w.body with
+      | val val => exact ih _ (hstep env val hinv)
+      | trap => rfl
+      | ub => rfl
+    | false =>
+      have hr : evalExpr env (w.withFacts F).ret = evalExpr env w.ret :=
+        evalExpr_optimizeBlock_skip
+          (GuardIR.evalGuard_conj_intro hFenv (evalGuard_imp_bot_of_eq_false hc))
+      simp only [runWhileSteps, WhileLoop.withFacts_cond, hc, hr, Bool.false_eq_true,
+        ↓reduceIte]
+
+/-- The facts selected from the strengthened candidates are implied by the conjunction of
+    their invariants, which every loop iteration preserves. -/
+private theorem selectFacts_sound (accept : GuardIR → Bool) (accVar : VarId) (latch : Stmt) :
+    ∀ cands : List GuardIR,
+      (∀ env, evalGuard env (selectFacts accept (loopInvariants accVar latch cands)).2 = true →
+        evalGuard env (selectFacts accept (loopInvariants accVar latch cands)).1 = true) ∧
+      ∀ env val, evalGuard env (selectFacts accept (loopInvariants accVar latch cands)).2 = true →
+        evalGuard (execStmt latch (updateEnv env accVar val))
+          (selectFacts accept (loopInvariants accVar latch cands)).2 = true := by
+  intro cands
+  induction cands with
+  | nil => exact ⟨fun _ _ => rfl, fun _ _ _ => rfl⟩
+  | cons c cs ih =>
+    rw [loopInvariants]
+    split
+    · next inv hs =>
+      split
+      · exact ih
+      · rw [selectFacts]
+        split
+        · have hsound := strengthenLoopInvariantIR_sound hs
+          refine ⟨fun env h => ?_, fun env val h => ?_⟩
+          · rw [GuardIR.evalGuard_mkConj, Bool.and_eq_true] at h ⊢
+            exact ⟨hsound.1 env h.1, ih.1 env h.2⟩
+          · rw [GuardIR.evalGuard_mkConj, Bool.and_eq_true] at h ⊢
+            exact ⟨hsound.2 env val h.1, ih.2 env val h.2⟩
+        · exact ih
+    · exact ih
+
+/-- If every accepted invariant holds in a state, so does their conjunction. -/
+private theorem selectFacts_accept {accept : GuardIR → Bool} {env : Env}
+    (hacc : ∀ inv, accept inv = true → evalGuard env inv = true) :
+    ∀ invs : List (GuardIR × GuardIR), evalGuard env (selectFacts accept invs).2 = true := by
+  intro invs
+  induction invs with
+  | nil => rfl
+  | cons p ps ih =>
+    rw [selectFacts]
+    split
+    · next ha =>
+      rw [GuardIR.evalGuard_mkConj, hacc p.2 ha, ih]
+      rfl
+    · exact ih
+
+/-- A trivial hoisted guard means the entry context establishes the invariant across `init`. -/
+private theorem hoistLoopGuardIR_top_sound {init : Stmt} {ctx inv : GuardIR} {env : Env}
+    (h : hoistLoopGuardIR init ctx inv = .top) (hctx : evalGuard env ctx = true) :
+    evalGuard (execStmt init env) inv = true :=
+  GuardIR.entailsAfter_sound (s := init) (a := ctx) (b := inv)
+    (by rw [GuardIR.entailsAfter_eq]; exact GuardIR.isTop_iff.mpr h) hctx
+
+private theorem WhileLoop.evalLoop_withFacts {w : WhileLoop} {F inv : GuardIR}
+    (hF : ∀ env, evalGuard env inv = true → evalGuard env F = true)
+    (hstep : ∀ env val, evalGuard env inv = true →
+      evalGuard (execStmt w.latch (updateEnv env w.accVar val)) inv = true)
+    (fuel : Nat) (env : Env) (hinit : evalGuard (execStmt w.init env) inv = true) :
+    evalLoop fuel env (.whileLoop (w.withFacts F)) = evalLoop fuel env (.whileLoop w) :=
+  WhileLoop.runWhileSteps_withFacts hF hstep fuel _ hinit
+
+/-- Loop versioning preserves the outcome from every entry state satisfying the context. -/
+private theorem WhileLoop.evalLoop_version (ctx : GuardIR) (w : WhileLoop) (fuel : Nat)
+    (env : Env) (hctx : evalGuard env ctx = true) :
+    evalLoop fuel env (WhileLoop.version ctx w) = evalLoop fuel env (.whileLoop w) := by
+  unfold WhileLoop.version WhileLoop.staticVersion
+  simp only []
+  generalize dedupGuards (Expr.factCandidates w.body ++ Expr.factCandidates w.ret) = cands
+  have hdyn := selectFacts_sound (fun _ => true) w.accVar w.latch cands
+  have hsta := selectFacts_sound (fun inv => GuardIR.isTop (hoistLoopGuardIR w.init ctx inv))
+    w.accVar w.latch cands
+  have hsta0 : evalGuard (execStmt w.init env)
+      (selectFacts (fun inv => GuardIR.isTop (hoistLoopGuardIR w.init ctx inv))
+        (loopInvariants w.accVar w.latch cands)).2 = true :=
+    selectFacts_accept (fun inv ha => hoistLoopGuardIR_top_sound (GuardIR.isTop_iff.mp ha) hctx)
+      _
+  have hpre : evalGuard env (GuardIR.simplifyUnder (GuardIR.norm ctx)
+      (GuardIR.norm (pullbackGuardIR w.init
+        (selectFacts (fun _ => true) (loopInvariants w.accVar w.latch cands)).2))) = true →
+      evalGuard (execStmt w.init env)
+        (selectFacts (fun _ => true) (loopInvariants w.accVar w.latch cands)).2 = true := by
+    intro h
+    have hn : evalGuard env (GuardIR.norm ctx) = true := by
+      rw [GuardIR.evalGuard_norm]; exact hctx
+    rw [evalGuard_simplifyUnder hn, GuardIR.evalGuard_norm, evalGuard_pullbackGuardIR] at h
+    exact h
+  split
+  · next htop =>
+    exact WhileLoop.evalLoop_withFacts hdyn.1 hdyn.2 fuel env (hpre (by rw [htop]; rfl))
+  · split
+    · exact WhileLoop.evalLoop_withFacts hsta.1 hsta.2 fuel env hsta0
+    · split
+      · exact WhileLoop.evalLoop_withFacts hsta.1 hsta.2 fuel env hsta0
+      · show (if evalGuard env _ then evalLoop fuel env _ else evalLoop fuel env _) = _
+        split
+        · next h => exact WhileLoop.evalLoop_withFacts hdyn.1 hdyn.2 fuel env (hpre h)
+        · exact WhileLoop.evalLoop_withFacts hsta.1 hsta.2 fuel env hsta0
+
+private theorem optimizeLoop_sound_aux (fuel : Nat) (prog : LoopProg) :
+    ∀ (ctx : GuardIR) (env : Env), evalGuard env ctx = true →
+      evalLoop fuel env (optimizeLoop ctx prog) = evalLoop fuel env prog := by
+  induction prog with
+  | whileLoop w =>
+    intro ctx env hctx
+    exact WhileLoop.evalLoop_version ctx w fuel env hctx
+  | iteLoop g t e iht ihe =>
+    intro ctx env hctx
+    rw [optimizeLoop]
+    split
+    · next hg =>
+      have hgt : evalGuard env g = true := GuardIR.entailsAfter_sound (s := .skip) hg hctx
+      rw [iht ctx env hctx]
+      simp only [evalLoop, hgt, ↓reduceIte]
+    · split
+      · next hng =>
+        have hgf : evalGuard env g = false :=
+          evalGuard_eq_false_of_imp_bot (GuardIR.entailsAfter_sound (s := .skip) hng hctx)
+        rw [ihe ctx env hctx]
+        simp only [evalLoop, hgf, Bool.false_eq_true, ↓reduceIte]
+      · simp only [evalLoop]
+        cases hg : evalGuard env g with
+        | true =>
+          simp only [↓reduceIte]
+          exact iht _ env (GuardIR.evalGuard_conj_intro hctx hg)
+        | false =>
+          simp only [Bool.false_eq_true, ↓reduceIte]
+          exact ihe _ env
+            (GuardIR.evalGuard_conj_intro hctx (evalGuard_imp_bot_of_eq_false hg))
+
+/-- Fuel-Indexed Stage-Guarded Soundness of `optimizeLoop` via `GuardedEquiv` and `liftEval (evalLoop fuel)`. -/
+theorem optimizeLoop_guardedEquiv (fuel : Nat) (ctx : GuardIR) (prog : LoopProg) :
+    GuardedEquiv (liftEval (evalLoop fuel)) (denoteGuard ctx) (optimizeLoop ctx prog) prog := by
+  exact (liftEval_guardedEquiv_iff (evalLoop fuel) (denoteGuard ctx) (optimizeLoop ctx prog)
+    prog).mpr (fun env h => optimizeLoop_sound_aux fuel prog ctx env h)
+
+/-- Fuel-Indexed Concrete Operational Soundness of `optimizeLoop`: For every `fuel` and `env`
+    satisfying `ctx`, `optimizeLoop ctx prog` evaluates to the exact same `LoopOutcome` as `prog`. -/
+theorem optimizeLoop_sound (fuel : Nat) (ctx : GuardIR) (prog : LoopProg) (env : Env) :
+    evalGuard env ctx = true → evalLoop fuel env (optimizeLoop ctx prog) = evalLoop fuel env prog := by
+  exact optimizeLoop_sound_aux fuel prog ctx env
+
+/-! ### Symbolic evaluation of the loop optimizer on the parametric shapes -/
+
+private theorem updateEnv_same (env : Env) (v : VarId) (val : Int) :
+    updateEnv env v val v = val := by
+  simp only [updateEnv, decide_true, ↓reduceIte]
+
+private theorem updateEnv_of_ne (env : Env) {v w : VarId} (h : w ≠ v) (val : Int) :
+    updateEnv env v val w = env w := by
+  simp only [updateEnv, h, decide_false, Bool.false_eq_true, ↓reduceIte]
+
+private theorem Int.ofNat_succ_ne_zero (k : Nat) : Int.ofNat (k + 1) ≠ 0 := by
+  simp only [Int.ofNat_eq_natCast]
+  omega
+
+private theorem Int.ofNat_succ_sub_one (k : Nat) : Int.ofNat (k + 1) - 1 = Int.ofNat k := by
+  simp only [Int.ofNat_eq_natCast]
+  omega
+
+/-- The counter decrement `i := i - 1`, and its preservation by surrounding statements that
+    do not write `i`. -/
+private theorem execStmt_dec_assign (i : VarId) (env : Env) :
+    execStmt (.assign i (.sub (.var i) (.lit 1))) env i = env i - 1 :=
+  updateEnv_same env i _
+
+private theorem execStmt_dec_seq_left {i : VarId} {A B : Stmt}
+    (hA : stmtWritesVar i A = false) (hB : ∀ env, execStmt B env i = env i - 1) (env : Env) :
+    execStmt (.seq A B) env i = env i - 1 := by
+  show execStmt B (execStmt A env) i = env i - 1
+  rw [hB, execStmt_of_not_writes hA]
+
+private theorem execStmt_dec_seq_right {i : VarId} {A B : Stmt}
+    (hA : ∀ env, execStmt A env i = env i - 1) (hB : stmtWritesVar i B = false) (env : Env) :
+    execStmt (.seq A B) env i = env i - 1 := by
+  show execStmt B (execStmt A env) i = env i - 1
+  rw [execStmt_of_not_writes hB, hA]
+
+/-- The counter still decrements when the loop body first writes the accumulator. -/
+private theorem execStmt_dec_after_acc {i acc : VarId} {latch : Stmt} (hia : i ≠ acc)
+    (h : ∀ env, execStmt latch env i = env i - 1) (env : Env) (val : Int) :
+    execStmt latch (updateEnv env acc val) i = env i - 1 := by
+  rw [h, updateEnv_of_ne _ hia]
+
+/-! One loop-header visit of the fuel-indexed evaluator and of its cost observer. -/
+
+private theorem runWhileSteps_exit {fuel : Nat} {env : Env} {w : WhileLoop}
+    (hc : evalGuard env w.cond = false) :
+    runWhileSteps (fuel + 1) env w = .done (evalExpr env w.ret) := by
+  simp only [runWhileSteps, hc, Bool.false_eq_true, ↓reduceIte]
+
+private theorem runWhileSteps_step {fuel : Nat} {env : Env} {w : WhileLoop} {val : Int}
+    (hc : evalGuard env w.cond = true) (hb : evalExpr env w.body = .val val) :
+    runWhileSteps (fuel + 1) env w =
+      runWhileSteps fuel (execStmt w.latch (updateEnv env w.accVar val)) w := by
+  simp only [runWhileSteps, hc, hb, ↓reduceIte]
+
+private theorem runWhileSteps_trap {fuel : Nat} {env : Env} {w : WhileLoop}
+    (hc : evalGuard env w.cond = true) (hb : evalExpr env w.body = .trap) :
+    runWhileSteps (fuel + 1) env w = .done .trap := by
+  simp only [runWhileSteps, hc, hb, ↓reduceIte]
+
+private theorem runWhileCheckCost_exit {fuel : Nat} {env : Env} {w : WhileLoop}
+    (hc : evalGuard env w.cond = false) :
+    runWhileCheckCost (fuel + 1) env w = guardEvalCost env w.cond + execCheckCost env w.ret := by
+  simp only [runWhileCheckCost, hc, Bool.false_eq_true, ↓reduceIte]
+
+private theorem runWhileCheckCost_step {fuel : Nat} {env : Env} {w : WhileLoop} {val : Int}
+    (hc : evalGuard env w.cond = true) (hb : evalExpr env w.body = .val val) :
+    runWhileCheckCost (fuel + 1) env w =
+      guardEvalCost env w.cond + (execCheckCost env w.body +
+        (stmtGuardCost (updateEnv env w.accVar val) w.latch +
+          runWhileCheckCost fuel (execStmt w.latch (updateEnv env w.accVar val)) w)) := by
+  simp only [runWhileCheckCost, hc, hb, ↓reduceIte]
+
+/-! The loop body `pa + (num / d + (y * d) / d)` before and after the rewrite. -/
+
+private theorem evalExpr_add_dualDiv {env : Env} (pa num y : PureExpr) {d : PureExpr}
+    (h : evalPure env d ≠ 0) :
+    evalExpr env (.add (.pure pa) (mkDualDivExpr num y d)) =
+      .val (evalPure env pa +
+        (evalPure env num / evalPure env d + evalPure env y * evalPure env d / evalPure env d)) := by
+  simp only [mkDualDivExpr, evalExpr, h, ↓reduceIte]
+
+private theorem execCheckCost_add_dualDiv {env : Env} (pa num y : PureExpr) {d : PureExpr}
+    (h : evalPure env d ≠ 0) :
+    execCheckCost env (.add (.pure pa) (mkDualDivExpr num y d)) = 2 := by
+  simp only [execCheckCost, evalExpr, execCheckCost_mkDualDivExpr num y h, Nat.zero_add]
+
+private theorem Expr.dualDivFast_counts (pa num y pd : PureExpr) :
+    checkedDivCount (Expr.mkBin .add .add (.pure pa)
+        (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure num) pd) (.pure y))) = 0 ∧
+      divOpCount (Expr.mkBin .add .add (.pure pa)
+        (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure num) pd) (.pure y))) ≤ 1 ∧
+      guardBranchCount (Expr.mkBin .add .add (.pure pa)
+        (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure num) pd) (.pure y))) = 0 := by
+  refine ⟨?_, ?_, ?_⟩
+  · rw [Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+  · rw [Expr.count_mkBin (cnt := divOpCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkBin (cnt := divOpCount) (fun _ => rfl) (fun _ _ => rfl)]
+    have h := Expr.divOpCount_mkSafeDiv_pure_le num pd
+    have e₁ : divOpCount (Expr.pure pa) = 0 := rfl
+    have e₂ : divOpCount (Expr.pure y) = 0 := rfl
+    omega
+  · rw [Expr.count_mkBin (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkBin (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+
+/-- With `nonZero d` entailed by the context, `optimizeBlock` lowers the loop body completely:
+    both checks and one division disappear. -/
+private theorem optimizeBlock_skip_add_dualDiv {K : GuardIR} (pa num y d : PureExpr)
+    (h : GuardIR.entailsAfter .skip K (.nonZero d) = true) :
+    (optimizeBlock K { body := .skip, ret := .add (.pure pa) (mkDualDivExpr num y d) }).ret =
+      Expr.mkBin .add .add (.pure pa)
+        (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure num) d) (.pure y)) := by
+  show optimizeExpr
+      (GuardIR.collect (GuardIR.entailsAfter .skip K) [.nonZero d, .nonZero d])
+      (.add (.pure pa) (mkDualDivExpr num y d)) = _
+  simp only [optimizeExpr, Expr.postFacts]
+  rw [optimizeExpr_mkDualDivExpr_of_hasHyp num y d
+    (by simp only [GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp_collect_head _ h,
+      Bool.true_or])]
+
+private theorem WhileLoop.withFacts_body_dualDiv {w : WhileLoop} {i d : VarId}
+    {pa num y : PureExpr} (hcond : w.cond = .nonZero (.var i))
+    (hbody : w.body = .add (.pure pa) (mkDualDivExpr num y (.var d))) :
+    (w.withFacts (.nonZero (.var d))).body =
+      Expr.mkBin .add .add (.pure pa)
+        (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure num) (.var d)) (.pure y)) := by
+  show (optimizeBlock (.conj (.nonZero (.var d)) w.cond) { body := .skip, ret := w.body }).ret = _
+  rw [hcond, hbody]
+  refine optimizeBlock_skip_add_dualDiv pa num y (.var d) ?_
+  simp [GuardIR.entailsAfter, pullbackGuardIR, GuardIR.entails, GuardIR.simplifyUnder,
+    GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, GuardIR.mkConj, GuardIR.nf,
+    GuardIR.residual, GuardIR.hasHyp, GuardIR.isTop]
+
+private theorem WhileLoop.withFacts_ret_pure (F : GuardIR) {w : WhileLoop} {pr : PureExpr}
+    (hret : w.ret = .pure pr) : (w.withFacts F).ret = .pure pr := by
+  show (optimizeBlock (.conj F (.imp w.cond .bot)) { body := .skip, ret := w.ret }).ret = _
+  rw [hret]
+  rfl
+
+/-- Check accounting for a counted dual-division loop whose divisor is covered by an
+    inductive invariant: each of the `k` iterations of the rewritten loop saves the two
+    division checks, and with a branch-free latch only the `k + 1` evaluations of the loop
+    condition remain. -/
+private theorem WhileLoop.dualDiv_cost {w : WhileLoop} {i d : VarId} {pa num y pr : PureExpr}
+    {inv : GuardIR}
+    (hcond : w.cond = .nonZero (.var i))
+    (hbody : w.body = .add (.pure pa) (mkDualDivExpr num y (.var d)))
+    (hret : w.ret = .pure pr)
+    (hd : ∀ env, evalGuard env inv = true → env d ≠ 0)
+    (hstep : ∀ env val, evalGuard env inv = true →
+      evalGuard (execStmt w.latch (updateEnv env w.accVar val)) inv = true)
+    (hdec : ∀ env val, execStmt w.latch (updateEnv env w.accVar val) i = env i - 1) :
+    ∀ (k : Nat) (env : Env), evalGuard env inv = true → env i = Int.ofNat k →
+      runWhileCheckCost (k + 1) env w =
+          runWhileCheckCost (k + 1) env (w.withFacts (.nonZero (.var d))) + 2 * k ∧
+        ((∀ env', stmtGuardCost env' w.latch = 0) →
+          runWhileCheckCost (k + 1) env (w.withFacts (.nonZero (.var d))) = k + 1) := by
+  have hret' : (w.withFacts (.nonZero (.var d))).ret = .pure pr :=
+    WhileLoop.withFacts_ret_pure _ hret
+  have hbody' := WhileLoop.withFacts_body_dualDiv hcond hbody
+  have hcost' : ∀ env, execCheckCost env (w.withFacts (.nonZero (.var d))).body = 0 := by
+    intro env
+    rw [hbody']
+    exact execCheckCost_eq_zero (Expr.dualDivFast_counts pa num y (.var d)).1
+      (Expr.dualDivFast_counts pa num y (.var d)).2.2
+  intro k
+  induction k with
+  | zero =>
+    intro env _ hi
+    have hc : evalGuard env w.cond = false := by
+      rw [hcond]
+      exact decide_eq_false (fun h => h hi)
+    have hc' : evalGuard env (w.withFacts (.nonZero (.var d))).cond = false := hc
+    rw [runWhileCheckCost_exit hc, runWhileCheckCost_exit hc', hret', hret,
+      WhileLoop.withFacts_cond]
+    refine ⟨rfl, fun _ => ?_⟩
+    rw [hcond]
+    rfl
+  | succ k ih =>
+    intro env hinv hi
+    have hne : env i ≠ 0 := by
+      rw [hi]
+      exact Int.ofNat_succ_ne_zero k
+    have hc : evalGuard env w.cond = true := by
+      rw [hcond]
+      exact decide_eq_true hne
+    have hc' : evalGuard env (w.withFacts (.nonZero (.var d))).cond = true := hc
+    have hdne : evalPure env (.var d) ≠ 0 := hd env hinv
+    have hval : evalExpr env w.body = .val (evalPure env pa +
+        (evalPure env num / evalPure env (.var d) +
+          evalPure env y * evalPure env (.var d) / evalPure env (.var d))) := by
+      rw [hbody]
+      exact evalExpr_add_dualDiv pa num y hdne
+    have hval' : evalExpr env (w.withFacts (.nonZero (.var d))).body = .val (evalPure env pa +
+        (evalPure env num / evalPure env (.var d) +
+          evalPure env y * evalPure env (.var d) / evalPure env (.var d))) := by
+      rw [← hval]
+      exact evalExpr_optimizeBlock_skip
+        (GuardIR.evalGuard_conj_intro (decide_eq_true hdne) hc)
+    have hcost : execCheckCost env w.body = 2 := by
+      rw [hbody]
+      exact execCheckCost_add_dualDiv pa num y hdne
+    have hi' : execStmt w.latch (updateEnv env w.accVar (evalPure env pa +
+        (evalPure env num / evalPure env (.var d) +
+          evalPure env y * evalPure env (.var d) / evalPure env (.var d)))) i = Int.ofNat k := by
+      rw [hdec, hi]
+      exact Int.ofNat_succ_sub_one k
+    have ih' := ih _ (hstep env _ hinv) hi'
+    rw [runWhileCheckCost_step hc hval, runWhileCheckCost_step hc' hval', hcost, hcost' env]
+    simp only [WhileLoop.withFacts_cond, WhileLoop.withFacts_accVar, WhileLoop.withFacts_latch]
+    refine ⟨?_, fun hl => ?_⟩
+    · rw [ih'.1]
+      omega
+    · rw [ih'.2 hl, hl, hcond]
+      show 1 + (0 + (0 + (k + 1))) = k + 1 + 1
+      omega
+
+/-- Static counts and check accounting for the rewritten loop as a whole program. -/
+private theorem WhileLoop.dualDiv_fast_facts {w : WhileLoop} {i d : VarId}
+    {pa num y pr : PureExpr} {inv : GuardIR}
+    (hcond : w.cond = .nonZero (.var i))
+    (hbody : w.body = .add (.pure pa) (mkDualDivExpr num y (.var d)))
+    (hret : w.ret = .pure pr)
+    (hs : strengthenLoopInvariantIR w.accVar w.latch (.nonZero (.var d)) = some inv)
+    (hdec : ∀ env val, execStmt w.latch (updateEnv env w.accVar val) i = env i - 1)
+    (n : Nat) (env : Env)
+    (hinv : evalGuard (execStmt w.init env) inv = true)
+    (hi : execStmt w.init env i = Int.ofNat n) :
+    loopCheckedDivCount (.whileLoop (w.withFacts (.nonZero (.var d)))) = 0 ∧
+      loopDivOpCount (.whileLoop (w.withFacts (.nonZero (.var d)))) ≤ 1 ∧
+      loopBranchCount (.whileLoop (w.withFacts (.nonZero (.var d)))) = 0 ∧
+      execLoopCheckCost (n + 1) env (.whileLoop w) =
+        execLoopCheckCost (n + 1) env (.whileLoop (w.withFacts (.nonZero (.var d)))) + 2 * n ∧
+      ((∀ env', stmtGuardCost env' w.latch = 0) → stmtGuardCost env w.init = 0 →
+        execLoopCheckCost (n + 1) env (.whileLoop (w.withFacts (.nonZero (.var d)))) = n + 1) := by
+  have hsound := strengthenLoopInvariantIR_sound hs
+  have hcost := WhileLoop.dualDiv_cost hcond hbody hret
+    (fun env h => of_decide_eq_true (hsound.1 env h)) hsound.2 hdec n (execStmt w.init env)
+    hinv hi
+  have hret' : (w.withFacts (.nonZero (.var d))).ret = .pure pr :=
+    WhileLoop.withFacts_ret_pure _ hret
+  have hbody' := WhileLoop.withFacts_body_dualDiv hcond hbody
+  have hcounts := Expr.dualDivFast_counts pa num y (.var d)
+  refine ⟨?_, ?_, rfl, ?_, fun hl h0 => ?_⟩
+  · show checkedDivCount (w.withFacts (.nonZero (.var d))).body +
+      checkedDivCount (w.withFacts (.nonZero (.var d))).ret = 0
+    rw [hbody', hret', hcounts.1]
+    rfl
+  · show divOpCount (w.withFacts (.nonZero (.var d))).body +
+      divOpCount (w.withFacts (.nonZero (.var d))).ret ≤ 1
+    rw [hbody', hret']
+    exact hcounts.2.1
+  · show stmtGuardCost env w.init + runWhileCheckCost (n + 1) (execStmt w.init env) w =
+      stmtGuardCost env w.init +
+        runWhileCheckCost (n + 1) (execStmt w.init env) (w.withFacts (.nonZero (.var d))) + 2 * n
+    rw [hcost.1]
+    omega
+  · show stmtGuardCost env w.init +
+      runWhileCheckCost (n + 1) (execStmt w.init env) (w.withFacts (.nonZero (.var d))) = n + 1
+    rw [hcost.2 hl, h0]
+    omega
+
+/-- The two identical candidates of the dual-division body yield one fact. -/
+private theorem loopInvariants_dup {accVar : VarId} {latch : Stmt} {p : PureExpr}
+    {inv : GuardIR}
+    (hs : strengthenLoopInvariantIR accVar latch (.nonZero p) = some inv)
+    (hnv : GuardIR.isBot (GuardIR.norm inv) = false) :
+    loopInvariants accVar latch (dedupGuards [.nonZero p, .nonZero p]) = [(.nonZero p, inv)] := by
+  have hd : dedupGuards [GuardIR.nonZero p, GuardIR.nonZero p] = [GuardIR.nonZero p] := by
+    simp [dedupGuards]
+  rw [hd]
+  simp only [loopInvariants, hs, hnv, Bool.false_eq_true, ↓reduceIte]
+
+private theorem GuardIR.isBot_norm_eq_false {g : GuardIR} {env : Env}
+    (h : evalGuard env g = true) : GuardIR.isBot (GuardIR.norm g) = false := by
+  cases hb : GuardIR.isBot (GuardIR.norm g) with
+  | false => rfl
+  | true =>
+    have hn := GuardIR.evalGuard_norm env g
+    rw [GuardIR.isBot_iff.mp hb, h] at hn
+    exact absurd hn (by simp [evalGuard])
+
+/-- When the entry context discharges the invariant across `init`, the loop is rewritten in
+    place, without a version branch. -/
+private theorem WhileLoop.version_of_discharge {ctx : GuardIR} {w : WhileLoop} {p : PureExpr}
+    {inv : GuardIR}
+    (hc : Expr.factCandidates w.body ++ Expr.factCandidates w.ret = [.nonZero p, .nonZero p])
+    (hs : strengthenLoopInvariantIR w.accVar w.latch (.nonZero p) = some inv)
+    (hnv : GuardIR.isBot (GuardIR.norm inv) = false)
+    (hd : hoistLoopGuardIR w.init ctx inv = .top) :
+    WhileLoop.version ctx w = .whileLoop (w.withFacts (.nonZero p)) := by
+  have hpre : GuardIR.simplifyUnder (GuardIR.norm ctx)
+      (GuardIR.norm (pullbackGuardIR w.init inv)) = .top :=
+    GuardIR.isTop_iff.mp ((isTop_synthesizeGuardIR _ _).symm.trans (GuardIR.isTop_iff.mpr hd))
+  unfold WhileLoop.version
+  simp only []
+  rw [hc, loopInvariants_dup hs hnv]
+  simp only [selectFacts, ↓reduceIte, GuardIR.mkConj_top_right, hpre]
+
+/-- When the residual preheader guard is a single runtime test that the context does not
+    refute, the result is the fast loop, either versioned on that test or (if the second
+    loop coincides with it) alone. -/
+private theorem WhileLoop.version_of_hoisted {ctx : GuardIR} {w : WhileLoop} {p q : PureExpr}
+    {inv : GuardIR}
+    (hc : Expr.factCandidates w.body ++ Expr.factCandidates w.ret = [.nonZero p, .nonZero p])
+    (hs : strengthenLoopInvariantIR w.accVar w.latch (.nonZero p) = some inv)
+    (hnv : GuardIR.isBot (GuardIR.norm inv) = false)
+    (hpre : GuardIR.simplifyUnder (GuardIR.norm ctx)
+      (GuardIR.norm (pullbackGuardIR w.init inv)) = .nonZero q)
+    (hnr : GuardIR.entails (GuardIR.norm ctx)
+      (GuardIR.norm (.imp (.nonZero q) .bot)) = false) :
+    WhileLoop.version ctx w = .whileLoop (w.withFacts (.nonZero p)) ∨
+      ∃ slow, WhileLoop.version ctx w =
+        .iteLoop (.nonZero q) (.whileLoop (w.withFacts (.nonZero p))) slow := by
+  unfold WhileLoop.version
+  simp only []
+  rw [hc, loopInvariants_dup hs hnv]
+  simp only [selectFacts, ↓reduceIte, GuardIR.mkConj_top_right, hpre, hnr, Bool.false_eq_true]
+  split
+  · next heq => exact Or.inl (by rw [← heq])
+  · exact Or.inr ⟨_, rfl⟩
+
+/-- Check elimination on a counted dual-division loop whose divisor invariant is discharged
+    at the preheader. -/
+private theorem optimizeLoop_dualDiv_elim {ctx : GuardIR} {w : WhileLoop} {i d : VarId}
+    {pa num y pr : PureExpr} {inv : GuardIR}
+    (hcond : w.cond = .nonZero (.var i))
+    (hbody : w.body = .add (.pure pa) (mkDualDivExpr num y (.var d)))
+    (hret : w.ret = .pure pr)
+    (hs : strengthenLoopInvariantIR w.accVar w.latch (.nonZero (.var d)) = some inv)
+    (hcov : ∃ env, evalGuard env inv = true)
+    (hdis : hoistLoopGuardIR w.init ctx inv = .top)
+    (hdec : ∀ env val, execStmt w.latch (updateEnv env w.accVar val) i = env i - 1)
+    (n : Nat) (env : Env) (hctx : evalGuard env ctx = true)
+    (hi : execStmt w.init env i = Int.ofNat n) :
+    loopCheckedDivCount (optimizeLoop ctx (.whileLoop w)) = 0 ∧
+      loopDivOpCount (optimizeLoop ctx (.whileLoop w)) ≤ 1 ∧
+      loopBranchCount (optimizeLoop ctx (.whileLoop w)) = 0 ∧
+      execLoopCheckCost (n + 1) env (.whileLoop w) =
+        execLoopCheckCost (n + 1) env (optimizeLoop ctx (.whileLoop w)) + 2 * n ∧
+      ((∀ env', stmtGuardCost env' w.latch = 0) → stmtGuardCost env w.init = 0 →
+        execLoopCheckCost (n + 1) env (optimizeLoop ctx (.whileLoop w)) = n + 1) := by
+  obtain ⟨env₀, hcov⟩ := hcov
+  have hopt : optimizeLoop ctx (.whileLoop w) = .whileLoop (w.withFacts (.nonZero (.var d))) :=
+    WhileLoop.version_of_discharge (by rw [hbody, hret]; rfl) hs
+      (GuardIR.isBot_norm_eq_false hcov) hdis
+  rw [hopt]
+  exact WhileLoop.dualDiv_fast_facts hcond hbody hret hs hdec n env
+    (hoistLoopGuardIR_top_sound hdis hctx) hi
+
+/-! ### Milestone 3 target theorems: check elimination, preheader hoisting and trap preservation -/
+
+/-- Parametric Known-Context Loop Check Elimination: Under `.nonZero (.var x)` across `n` counted
+    iterations, `optimizeLoop` eliminates all checked divisions and loop-version branches and reduces
+    dynamic check cost from `3 * n + 1` to `n + 1` (only the `n + 1` loop condition evaluations). -/
+theorem optimizeLoop_known_ctx_elim_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n) (hx : evalGuard env (.nonZero (.var x)) = true) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    let opt := optimizeLoop (.nonZero (.var x)) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt = n + 1 ∧
+      execLoopCheckCost (n + 1) env src = 3 * n + 1 := by
+  dsimp only
+  obtain ⟨h1, h2, h3, h4, h5⟩ := optimizeLoop_dualDiv_elim (ctx := .nonZero (.var x))
+    (w := mkCountedDivLoop x d i acc num y) (i := i) (d := d) rfl rfl rfl
+    (strengthenLoopInvariantIR_frame hda (decide_eq_false hid))
+    ⟨fun _ => 1, rfl⟩
+    (hoistLoopGuardIR_assign1_of_pos (.var rfl) x)
+    (execStmt_dec_after_acc hia (execStmt_dec_assign i))
+    n env hx ((updateEnv_of_ne env hid _).trans hi)
+  have hopt := h5 (fun _ => rfl) rfl
+  exact ⟨h1, h2, h3, hopt, by rw [h4, hopt]; omega⟩
+
+/-- Parametric Unknown-Context Preheader Hoisting: Under `.top` when `env x ≠ 0` across `n` counted
+    iterations, `optimizeLoop` hoists the divisor check out of the loop to the preheader, reducing
+    dynamic check cost from `3 * n + 1` to `≤ n + 2`. -/
+theorem optimizeLoop_unknown_ctx_hoist_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n) (hx : env x ≠ 0) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    let opt := optimizeLoop .top src
+    execLoopCheckCost (n + 1) env opt ≤ n + 2 ∧
+      execLoopCheckCost (n + 1) env src = 3 * n + 1 := by
+  dsimp only
+  have hs : strengthenLoopInvariantIR (mkCountedDivLoop x d i acc num y).accVar
+      (mkCountedDivLoop x d i acc num y).latch (.nonZero (.var d)) = some (.nonZero (.var d)) :=
+    strengthenLoopInvariantIR_frame hda (decide_eq_false hid)
+  have hpre : GuardIR.simplifyUnder (GuardIR.norm .top)
+      (GuardIR.norm (pullbackGuardIR (mkCountedDivLoop x d i acc num y).init
+        (.nonZero (.var d)))) = .nonZero (.var x) := by
+    simp [mkCountedDivLoop, pullbackGuardIR, GuardIR.subst, PureExpr.subst, GuardIR.norm,
+      PureExpr.fold, GuardIR.mkNonZero, GuardIR.simplifyUnder, GuardIR.nf, GuardIR.residual,
+      GuardIR.hasHyp]
+  have hnr : GuardIR.entails (GuardIR.norm .top)
+      (GuardIR.norm (.imp (.nonZero (.var x)) .bot)) = false := by
+    simp [GuardIR.entails, GuardIR.simplifyUnder, GuardIR.norm, PureExpr.fold,
+      GuardIR.mkNonZero, GuardIR.impN, GuardIR.mkNot, GuardIR.nf, GuardIR.mkImp,
+      GuardIR.residual, GuardIR.hasHyp, GuardIR.isTop]
+  have hver := WhileLoop.version_of_hoisted (ctx := .top)
+    (w := mkCountedDivLoop x d i acc num y) rfl hs
+    (GuardIR.isBot_norm_eq_false (env := fun _ => 1) rfl) hpre hnr
+  have hinv : evalGuard (execStmt (mkCountedDivLoop x d i acc num y).init env)
+      (.nonZero (.var d)) = true := by
+    show decide (updateEnv env d (evalPure env (.var x)) d ≠ 0) = true
+    rw [updateEnv_same]
+    exact decide_eq_true hx
+  obtain ⟨_, _, _, h4, h5⟩ := WhileLoop.dualDiv_fast_facts
+    (w := mkCountedDivLoop x d i acc num y) (i := i) (d := d) rfl rfl rfl hs
+    (execStmt_dec_after_acc hia (execStmt_dec_assign i))
+    n env hinv ((updateEnv_of_ne env hid _).trans hi)
+  have hfast := h5 (fun _ => rfl) rfl
+  refine ⟨?_, by rw [h4, hfast]; omega⟩
+  show execLoopCheckCost (n + 1) env (WhileLoop.version .top (mkCountedDivLoop x d i acc num y)) ≤
+    n + 2
+  rcases hver with hopt | ⟨slow, hopt⟩
+  · rw [hopt, hfast]
+    omega
+  · rw [hopt]
+    show guardEvalCost env (.nonZero (.var x)) +
+      (if evalGuard env (.nonZero (.var x)) then
+        execLoopCheckCost (n + 1) env
+          (.whileLoop ((mkCountedDivLoop x d i acc num y).withFacts (.nonZero (.var d))))
+      else execLoopCheckCost (n + 1) env slow) ≤ n + 2
+    have hgx : evalGuard env (.nonZero (.var x)) = true := decide_eq_true hx
+    rw [hgx, hfast]
+    show 1 + (n + 1) ≤ n + 2
+    omega
+
+/-- Parametric Zero-Divisor Preheader Safety (0 Iterations vs ≥1 Iterations): Under `.top` when `x = 0`,
+    `optimizeLoop .top` returns `.done (.val (env₀ acc))` when the loop executes `0` iterations (`i = 0`)
+    and safely returns `.done .trap` when the loop executes `n + 1` iterations (`i = n + 1`). -/
+theorem optimizeLoop_zero_div_behavior_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env₀ env₁ : Env)
+    (hx₀ : env₀ x = 0) (hi₀ : env₀ i = 0)
+    (hx₁ : env₁ x = 0) (hi₁ : env₁ i = Int.ofNat (n + 1)) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    evalLoop 1 env₀ (optimizeLoop .top src) = .done (.val (env₀ acc)) ∧
+      evalLoop (n + 2) env₁ (optimizeLoop .top src) = .done .trap := by
+  dsimp only
+  have _ := hia
+  have _ := hx₀
+  rw [optimizeLoop_sound 1 .top _ env₀ rfl, optimizeLoop_sound (n + 2) .top _ env₁ rfl]
+  constructor
+  · show runWhileSteps (0 + 1) (execStmt (.assign d (.var x)) env₀)
+      (mkCountedDivLoop x d i acc num y) = _
+    have hc : evalGuard (execStmt (.assign d (.var x)) env₀)
+        (mkCountedDivLoop x d i acc num y).cond = false := by
+      show decide (updateEnv env₀ d (evalPure env₀ (.var x)) i ≠ 0) = false
+      rw [updateEnv_of_ne _ hid]
+      exact decide_eq_false (fun h => h hi₀)
+    rw [runWhileSteps_exit hc]
+    show LoopOutcome.done (.val (updateEnv env₀ d (evalPure env₀ (.var x)) acc)) = _
+    rw [updateEnv_of_ne _ (Ne.symm hda)]
+  · show runWhileSteps (n + 1 + 1) (execStmt (.assign d (.var x)) env₁)
+      (mkCountedDivLoop x d i acc num y) = _
+    have hc : evalGuard (execStmt (.assign d (.var x)) env₁)
+        (mkCountedDivLoop x d i acc num y).cond = true := by
+      show decide (updateEnv env₁ d (evalPure env₁ (.var x)) i ≠ 0) = true
+      rw [updateEnv_of_ne _ hid, hi₁]
+      exact decide_eq_true (Int.ofNat_succ_ne_zero n)
+    have hd0 : evalPure (execStmt (.assign d (.var x)) env₁) (.var d) = 0 :=
+      (updateEnv_same env₁ d _).trans hx₁
+    have hb : evalExpr (execStmt (.assign d (.var x)) env₁)
+        (mkCountedDivLoop x d i acc num y).body = .trap := by
+      show evalExpr _ (.add (.pure (.var acc)) (mkDualDivExpr num y (.var d))) = .trap
+      simp only [evalExpr, evalExpr_mkDualDivExpr_trap num y hd0]
+    exact runWhileSteps_trap hc hb
+
+/-- Parametric Two-Stage Pipeline Inductive Strengthening Elimination: Under `x ≠ 0 ∧ z ≠ 0`,
+    `optimizeLoop` strengthens `d ≠ 0` to `d ≠ 0 ∧ nextD ≠ 0` across `d := nextD; i := i - 1`,
+    eliminates all checked divisions and loop-version branches, and achieves check cost `n + 1`. -/
+theorem optimizeLoop_pipeline_elim_param (x z d nextD i acc : VarId)
+    (hda : d ≠ acc) (hna : nextD ≠ acc)
+    (hid : i ≠ d) (hin : i ≠ nextD) (hia : i ≠ acc) (hdn : d ≠ nextD)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := LoopProg.whileLoop (mkPipelineDivLoop x z d nextD i acc num y)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt = n + 1 := by
+  dsimp only
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_pipeline_pos acc d nextD i hda hna
+    (Ne.symm hid) (Ne.symm hin) hdn (.sub (.var i) (.lit 1))
+  have hinit : stmtWritesVar i (mkPipelineDivLoop x z d nextD i acc num y).init = false := by
+    simp [mkPipelineDivLoop, stmtWritesVar, Ne.symm hid, Ne.symm hin]
+  obtain ⟨h1, h2, h3, _, h5⟩ := optimizeLoop_dualDiv_elim
+    (ctx := .conj (.nonZero (.var x)) (.nonZero (.var z)))
+    (w := mkPipelineDivLoop x z d nextD i acc num y) (i := i) (d := d) rfl rfl rfl hs
+    ⟨fun _ => 1, hpos.eval (fun _ _ => by decide)⟩
+    (hoistLoopGuardIR_assign2_of_pos hpos x z)
+    (execStmt_dec_after_acc hia
+      (execStmt_dec_seq_left (i := i) (A := .assign d (.var nextD))
+        (decide_eq_false (Ne.symm hid)) (execStmt_dec_assign i)))
+    n env hctx ((execStmt_of_not_writes hinit env).trans hi)
+  exact ⟨h1, h2, h3, h5 (fun _ => rfl) rfl⟩
+
+/-- Parametric Non-Invariant Decrementing-Divisor Trap Preservation: Even when `init` sets `d := 1`
+    (`x = 1 ≠ 0`), `d := d - 1` violates loop invariance on iteration 2 (`i = 2`), so `optimizeLoop`
+    must preserve `.done .trap` (rejecting naive entry-only check elimination). -/
+theorem optimizeLoop_decrement_div_trap_param (x d i acc : VarId)
+    (hda : d ≠ acc) (hia : i ≠ acc) (hid : i ≠ d)
+    (num : PureExpr) (env : Env) (hx : env x = 1) (hi : env i = 2) :
+    evalLoop 3 env (optimizeLoop (.nonZero (.var x)) (.whileLoop (mkDecrementDivisorLoop x d i acc num))) =
+      .done .trap := by
+  have hctx : evalGuard env (.nonZero (.var x)) = true := by
+    show decide (env x ≠ 0) = true
+    rw [hx]
+    rfl
+  rw [optimizeLoop_sound 3 _ _ env hctx]
+  show runWhileSteps (2 + 1) (execStmt (.assign d (.var x)) env)
+    (mkDecrementDivisorLoop x d i acc num) = _
+  have hE0d : execStmt (.assign d (.var x)) env d = 1 := (updateEnv_same env d _).trans hx
+  have hE0i : execStmt (.assign d (.var x)) env i = 2 := (updateEnv_of_ne env hid _).trans hi
+  generalize execStmt (.assign d (.var x)) env = E₀ at hE0d hE0i
+  have hc1 : evalGuard E₀ (mkDecrementDivisorLoop x d i acc num).cond = true := by
+    show decide (E₀ i ≠ 0) = true
+    rw [hE0i]
+    rfl
+  have hb1 : evalExpr E₀ (mkDecrementDivisorLoop x d i acc num).body =
+      .val (evalPure E₀ num / 1) := by
+    show evalExpr E₀ (.checkedDiv (.pure num) (.pure (.var d))) = _
+    simp [evalExpr, evalPure, hE0d]
+  rw [runWhileSteps_step hc1 hb1]
+  have hE1d : execStmt (mkDecrementDivisorLoop x d i acc num).latch
+      (updateEnv E₀ (mkDecrementDivisorLoop x d i acc num).accVar (evalPure E₀ num / 1)) d = 0 := by
+    show updateEnv (updateEnv (updateEnv E₀ acc (evalPure E₀ num / 1)) d
+      (updateEnv E₀ acc (evalPure E₀ num / 1) d - 1)) i _ d = 0
+    rw [updateEnv_of_ne _ (Ne.symm hid), updateEnv_same, updateEnv_of_ne _ hda, hE0d]
+    rfl
+  have hE1i : execStmt (mkDecrementDivisorLoop x d i acc num).latch
+      (updateEnv E₀ (mkDecrementDivisorLoop x d i acc num).accVar (evalPure E₀ num / 1)) i = 1 := by
+    show updateEnv (updateEnv (updateEnv E₀ acc (evalPure E₀ num / 1)) d
+        (updateEnv E₀ acc (evalPure E₀ num / 1) d - 1)) i
+      (updateEnv (updateEnv E₀ acc (evalPure E₀ num / 1)) d
+        (updateEnv E₀ acc (evalPure E₀ num / 1) d - 1) i - 1) i = 1
+    rw [updateEnv_same, updateEnv_of_ne _ hid, updateEnv_of_ne _ hia, hE0i]
+    rfl
+  generalize execStmt (mkDecrementDivisorLoop x d i acc num).latch
+    (updateEnv E₀ (mkDecrementDivisorLoop x d i acc num).accVar (evalPure E₀ num / 1)) = E₁
+    at hE1d hE1i
+  refine runWhileSteps_trap ?_ ?_
+  · show decide (E₁ i ≠ 0) = true
+    rw [hE1i]
+    rfl
+  · show evalExpr E₁ (.checkedDiv (.pure num) (.pure (.var d))) = .trap
+    simp [evalExpr, evalPure, hE1d]
+
+/-! ### Milestone 3 target theorems: non-vacuous strengthening and elimination across arbitrary latch frames -/
+
+/-- Non-Vacuous Stationary Divisor Strengthening & Preheader Discharge:
+    Across `i := stepRhs` for arbitrary `stepRhs : PureExpr`, `strengthenLoopInvariantIR` returns
+    `some inv` covering all environments with `env d ≠ 0` and discharging to `.top` across
+    `d := x` under `.nonZero (.var x)` (ruling out vacuous `some .bot` and fixture-only latches). -/
+theorem strengthenLoopInvariantIR_stationary_safe (accVar d i : VarId)
+    (hda : d ≠ accVar) (hdi : d ≠ i) (stepRhs : PureExpr) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar (.assign i stepRhs) (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x : VarId, hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) := by
+  exact ⟨_, strengthenLoopInvariantIR_frame hda (decide_eq_false (Ne.symm hdi)),
+    fun _ h => decide_eq_true h, fun x => hoistLoopGuardIR_assign1_of_pos (.var rfl) x⟩
+
+/-- Non-Vacuous Pipeline Divisor Strengthening & Preheader Discharge:
+    Across `d := nextD; i := stepRhs` for arbitrary `stepRhs : PureExpr`, `strengthenLoopInvariantIR`
+    returns `some inv` covering all environments with `env d ≠ 0 ∧ env nextD ≠ 0` and discharging
+    to `.top` across `d := x; nextD := z` under `x ≠ 0 ∧ z ≠ 0` (ruling out vacuous `some .bot`
+    and fixture-only pipeline latches). -/
+theorem strengthenLoopInvariantIR_pipeline_safe (accVar d nextD i : VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) (stepRhs : PureExpr) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env nextD ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign nextD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) := by
+  obtain ⟨inv, hs, hpos⟩ :=
+    strengthenLoopInvariantIR_pipeline_pos accVar d nextD i hda hna hdi hni hdn stepRhs
+  exact ⟨inv, hs,
+    fun env h₁ h₂ => hpos.eval (by rintro u (rfl | rfl) <;> assumption),
+    fun x z => hoistLoopGuardIR_assign2_of_pos hpos x z⟩
+
+/-- General One-Step Inductive Strengthening Completeness & Non-Vacuity:
+    For arbitrary `accVar`, `latch`, and `target`, whenever `cand := GuardIR.conj target g₁`
+    (with `g₁ := havocGuardIR accVar (pullbackGuardIR latch target)`) closes in one step under
+    `synthesizeGuardIR`, `strengthenLoopInvariantIR` succeeds with `some inv` covering `target ∧ g₁`. -/
+theorem strengthenLoopInvariantIR_step_complete (accVar : VarId) (latch : Stmt) (target : GuardIR) :
+    let g₁ := havocGuardIR accVar (pullbackGuardIR latch target)
+    let cand := GuardIR.conj target g₁
+    synthesizeGuardIR cand (havocGuardIR accVar (pullbackGuardIR latch cand)) = .top →
+      ∃ inv,
+        strengthenLoopInvariantIR accVar latch target = some inv ∧
+        (∀ env : Env, evalGuard env target = true → evalGuard env g₁ = true → evalGuard env inv = true) := by
+  dsimp only
+  intro h
+  have hclosed : GuardIR.closedBy (.conj target (GuardIR.loopStep accVar latch target))
+      (GuardIR.loopStep accVar latch
+        (.conj target (GuardIR.loopStep accVar latch target))) = true := by
+    have htop : GuardIR.isTop (synthesizeGuardIR
+        (.conj target (GuardIR.loopStep accVar latch target))
+        (GuardIR.loopStep accVar latch
+          (.conj target (GuardIR.loopStep accVar latch target)))) = true :=
+      GuardIR.isTop_iff.mpr h
+    unfold GuardIR.closedBy
+    rw [GuardIR.entails_eq]
+    simp only [htop, Bool.true_or]
+  unfold strengthenLoopInvariantIR
+  simp only []
+  split
+  · exact ⟨target, rfl, fun _ ht _ => ht⟩
+  · split
+    · exact ⟨_, rfl, fun env ht hg => GuardIR.evalGuard_conj_intro ht hg⟩
+    · exact ⟨_, rfl, fun env ht hg => GuardIR.evalGuard_conj_intro ht hg⟩
+
+/-- Syntactic Transparency of `havocGuardIR` on Non-Mentioning Guards:
+    When `guardMentionsVar v g = false`, `havocGuardIR v g` returns `g` unchanged without
+    injecting unnormalized wrapper syntax. -/
+theorem havocGuardIR_nonMention_eq (v : VarId) (g : GuardIR)
+    (h : guardMentionsVar v g = false) :
+    havocGuardIR v g = g := by
+  exact havocGuardIR_of_not_mentions h
+
+/-- Unconditional Frame-Preserving `Stmt` Strengthening & Preheader Discharge:
+    For ANY `latch : Stmt` built from `skip`/`assign`/`seq`/`ite` that writes neither `d`
+    nor `accVar` (`stmtWritesVar d latch = false`, `stmtWritesVar accVar latch = false`),
+    `strengthenLoopInvariantIR` returns `some inv` covering all environments with `env d ≠ 0`
+    and discharging to `.top` across `d := x` under `.nonZero (.var x)`. -/
+theorem strengthenLoopInvariantIR_frame_stmt_safe (accVar d : VarId) (latch : Stmt)
+    (hda : d ≠ accVar)
+    (hdWrite : stmtWritesVar d latch = false)
+    (haWrite : stmtWritesVar accVar latch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar latch (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x : VarId, hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) := by
+  have _ := haWrite
+  exact ⟨_, strengthenLoopInvariantIR_frame hda hdWrite,
+    fun _ h => decide_eq_true h, fun x => hoistLoopGuardIR_assign1_of_pos (.var rfl) x⟩
+
+/-- Unconditional Variable-Swap Latch Strengthening & Preheader Discharge:
+    Across `preLatch; tmp := d; d := altD; altD := tmp; postLatch` for arbitrary frame-preserving
+    surrounding statements `preLatch` and `postLatch`, `strengthenLoopInvariantIR` returns `some inv`
+    covering `env d ≠ 0 ∧ env altD ≠ 0` and discharging to `.top` across `d := x; altD := z`. -/
+theorem strengthenLoopInvariantIR_swap_safe (accVar d altD tmp : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hala : altD ≠ accVar) (hta : tmp ≠ accVar)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreAlt : stmtWritesVar altD preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostAlt : stmtWritesVar altD postLatch = false)
+    (hPostTmp : stmtWritesVar tmp postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign tmp (.var d))
+            (.seq (.assign d (.var altD))
+              (.seq (.assign altD (.var tmp)) postLatch))))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env altD ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign altD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) := by
+  have _ := hta
+  have _ := hPreAcc
+  have _ := hPostTmp
+  have _ := hPostAcc
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_swap_pos accVar d altD tmp preLatch
+    postLatch hda hala hdal hdt halt hPreD hPreAlt hPostD hPostAlt
+  exact ⟨inv, hs,
+    fun env h₁ h₂ => hpos.eval (by rintro u (rfl | rfl) <;> assumption),
+    fun x z => hoistLoopGuardIR_assign2_of_pos hpos x z⟩
+
+/-- Unconditional Three-Stage Pipeline Strengthening & Preheader Discharge:
+    Across `preLatch; d := d₁; d₁ := d₂; postLatch` for arbitrary frame-preserving surrounding
+    statements `preLatch` and `postLatch`, `strengthenLoopInvariantIR` strengthens `.nonZero (.var d)`
+    across multiple backward steps to `some inv` covering `env d ≠ 0 ∧ env d₁ ≠ 0 ∧ env d₂ ≠ 0`
+    and discharging to `.top` across `d := x; d₁ := w; d₂ := z`. -/
+theorem strengthenLoopInvariantIR_pipeline3_safe (accVar d d₁ d₂ : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign d (.var d₁))
+            (.seq (.assign d₁ (.var d₂)) postLatch)))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x w z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) := by
+  have _ := hPreAcc
+  have _ := hPostAcc
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_pipeline3_pos accVar d d₁ d₂ preLatch
+    postLatch hda hd₁a hd₂a hdd₁ hdd₂ hd₁d₂ hPreD hPreD₁ hPreD₂ hPostD hPostD₁ hPostD₂
+  exact ⟨inv, hs,
+    fun env h₀ h₁ h₂ => hpos.eval (by rintro u (rfl | rfl | rfl) <;> assumption),
+    fun x w z => hoistLoopGuardIR_assign3_of_pos hpos x w z⟩
+
+/-- Unconditional Branching-`ite` Latch Strengthening & Preheader Discharge:
+    Across `preLatch; if branchCond { d := d₁ } else { d := d₂ }; postLatch` for arbitrary
+    `branchCond : GuardIR` and arbitrary frame-preserving surrounding statements `preLatch` and
+    `postLatch`, `strengthenLoopInvariantIR` returns `some inv` covering
+    `env d ≠ 0 ∧ env d₁ ≠ 0 ∧ env d₂ ≠ 0` and discharging to `.top` across `d := x; d₁ := w; d₂ := z`. -/
+theorem strengthenLoopInvariantIR_ite_branch_safe (accVar d d₁ d₂ : VarId)
+    (branchCond : GuardIR) (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x w z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) := by
+  have _ := hPreAcc
+  have _ := hPostAcc
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_ite_branch_pos accVar d d₁ d₂ branchCond
+    preLatch postLatch hda hd₁a hd₂a hdd₁ hdd₂ hd₁d₂ hPreD hPreD₁ hPreD₂ hPostD hPostD₁ hPostD₂
+  exact ⟨inv, hs,
+    fun env h₀ h₁ h₂ => hpos.eval (by rintro u (rfl | rfl | rfl) <;> assumption),
+    fun x w z => hoistLoopGuardIR_assign3_of_pos hpos x w z⟩
+
+/-- Parametric Frame-Preserving Surrounding-`Stmt` Loop Check Elimination:
+    Under `.nonZero (.var x)` across `n` counted iterations with arbitrary frame-preserving
+    `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked divisions and loop-version
+    branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_frame_stmt_elim_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hx : evalGuard env (.nonZero (.var x)) = true) :
+    let src := LoopProg.whileLoop (mkFrameStmtDivLoop x d i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.nonZero (.var x)) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  dsimp only
+  have _ := hPreAcc
+  have _ := hPostAcc
+  have hw : stmtWritesVar d
+      (mkFrameStmtDivLoop x d i acc num y preLatch postLatch).latch = false := by
+    simp [mkFrameStmtDivLoop, stmtWritesVar, hPreD, hPostD, hid]
+  obtain ⟨h1, h2, h3, h4, _⟩ := optimizeLoop_dualDiv_elim (ctx := .nonZero (.var x))
+    (w := mkFrameStmtDivLoop x d i acc num y preLatch postLatch) (i := i) (d := d) rfl rfl rfl
+    (strengthenLoopInvariantIR_frame hda hw)
+    ⟨fun _ => 1, rfl⟩
+    (hoistLoopGuardIR_assign1_of_pos (.var rfl) x)
+    (execStmt_dec_after_acc hia
+      (execStmt_dec_seq_left (i := i) (A := preLatch) hPreI
+        (execStmt_dec_seq_right (i := i) (B := postLatch) (execStmt_dec_assign i) hPostI)))
+    n env hx ((updateEnv_of_ne env hid _).trans hi)
+  exact ⟨h1, h2, h3, Nat.le_of_eq h4.symm⟩
+
+/-- Parametric Variable-Swap Latch Loop Check Elimination:
+    Under `x ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkSwapDivLoop` with arbitrary
+    frame-preserving `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked divisions
+    and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_swap_elim_param (x z d altD tmp i acc : VarId)
+    (hda : d ≠ acc) (hala : altD ≠ acc) (hta : tmp ≠ acc)
+    (hid : i ≠ d) (hial : i ≠ altD) (hit : i ≠ tmp) (hia : i ≠ acc)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreAlt : stmtWritesVar altD preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostAlt : stmtWritesVar altD postLatch = false)
+    (hPostTmp : stmtWritesVar tmp postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := LoopProg.whileLoop (mkSwapDivLoop x z d altD tmp i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  dsimp only
+  have _ := hta
+  have _ := hPreAcc
+  have _ := hPostTmp
+  have _ := hPostAcc
+  have hPostD' : stmtWritesVar d (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD, hid]
+  have hPostAlt' : stmtWritesVar altD
+      (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostAlt, hial]
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_swap_pos acc d altD tmp preLatch
+    (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) hda hala hdal hdt halt hPreD hPreAlt
+    hPostD' hPostAlt'
+  have hinit : stmtWritesVar i
+      (mkSwapDivLoop x z d altD tmp i acc num y preLatch postLatch).init = false := by
+    simp [mkSwapDivLoop, stmtWritesVar, Ne.symm hid, Ne.symm hial]
+  obtain ⟨h1, h2, h3, h4, _⟩ := optimizeLoop_dualDiv_elim
+    (ctx := .conj (.nonZero (.var x)) (.nonZero (.var z)))
+    (w := mkSwapDivLoop x z d altD tmp i acc num y preLatch postLatch) (i := i) (d := d)
+    rfl rfl rfl hs
+    ⟨fun _ => 1, hpos.eval (fun _ _ => by decide)⟩
+    (hoistLoopGuardIR_assign2_of_pos hpos x z)
+    (execStmt_dec_after_acc hia
+      (execStmt_dec_seq_left (i := i) (A := preLatch) hPreI
+        (execStmt_dec_seq_left (i := i) (A := .assign tmp (.var d))
+          (decide_eq_false (Ne.symm hit))
+          (execStmt_dec_seq_left (i := i) (A := .assign d (.var altD))
+            (decide_eq_false (Ne.symm hid))
+            (execStmt_dec_seq_left (i := i) (A := .assign altD (.var tmp))
+              (decide_eq_false (Ne.symm hial))
+              (execStmt_dec_seq_right (i := i) (B := postLatch) (execStmt_dec_assign i)
+                hPostI))))))
+    n env hctx ((execStmt_of_not_writes hinit env).trans hi)
+  exact ⟨h1, h2, h3, Nat.le_of_eq h4.symm⟩
+
+/-- Parametric Three-Stage Pipeline Loop Check Elimination:
+    Under `x ≠ 0 ∧ w ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkPipeline3DivLoop` with
+    arbitrary frame-preserving `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked
+    divisions and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_pipeline3_elim_param (x w z d d₁ d₂ i acc : VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := LoopProg.whileLoop (mkPipeline3DivLoop x w z d d₁ d₂ i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  dsimp only
+  have _ := hPreAcc
+  have _ := hPostAcc
+  have hPostD' : stmtWritesVar d (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD, hid]
+  have hPostD₁' : stmtWritesVar d₁
+      (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD₁, hid₁]
+  have hPostD₂' : stmtWritesVar d₂
+      (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD₂, hid₂]
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_pipeline3_pos acc d d₁ d₂ preLatch
+    (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) hda hd₁a hd₂a hdd₁ hdd₂ hd₁d₂
+    hPreD hPreD₁ hPreD₂ hPostD' hPostD₁' hPostD₂'
+  have hinit : stmtWritesVar i
+      (mkPipeline3DivLoop x w z d d₁ d₂ i acc num y preLatch postLatch).init = false := by
+    simp [mkPipeline3DivLoop, stmtWritesVar, Ne.symm hid, Ne.symm hid₁, Ne.symm hid₂]
+  obtain ⟨h1, h2, h3, h4, _⟩ := optimizeLoop_dualDiv_elim
+    (ctx := .conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+    (w := mkPipeline3DivLoop x w z d d₁ d₂ i acc num y preLatch postLatch) (i := i) (d := d)
+    rfl rfl rfl hs
+    ⟨fun _ => 1, hpos.eval (fun _ _ => by decide)⟩
+    (hoistLoopGuardIR_assign3_of_pos hpos x w z)
+    (execStmt_dec_after_acc hia
+      (execStmt_dec_seq_left (i := i) (A := preLatch) hPreI
+        (execStmt_dec_seq_left (i := i) (A := .assign d (.var d₁))
+          (decide_eq_false (Ne.symm hid))
+          (execStmt_dec_seq_left (i := i) (A := .assign d₁ (.var d₂))
+            (decide_eq_false (Ne.symm hid₁))
+            (execStmt_dec_seq_right (i := i) (B := postLatch) (execStmt_dec_assign i)
+              hPostI)))))
+    n env hctx ((execStmt_of_not_writes hinit env).trans hi)
+  exact ⟨h1, h2, h3, Nat.le_of_eq h4.symm⟩
+
+/-- Parametric Branching-`ite` Latch Loop Check Elimination:
+    Under `x ≠ 0 ∧ w ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkBranchDivLoop` for arbitrary
+    `branchCond : GuardIR` and arbitrary frame-preserving `preLatch` and `postLatch`, `optimizeLoop`
+    eliminates all checked divisions and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_ite_branch_elim_param (x w z d d₁ d₂ i acc : VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (branchCond : GuardIR) (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := LoopProg.whileLoop (mkBranchDivLoop x w z d d₁ d₂ i acc branchCond num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  dsimp only
+  have _ := hPreAcc
+  have _ := hPostAcc
+  have hPostD' : stmtWritesVar d (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD, hid]
+  have hPostD₁' : stmtWritesVar d₁
+      (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD₁, hid₁]
+  have hPostD₂' : stmtWritesVar d₂
+      (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) = false := by
+    simp [stmtWritesVar, hPostD₂, hid₂]
+  obtain ⟨inv, hs, hpos⟩ := strengthenLoopInvariantIR_ite_branch_pos acc d d₁ d₂ branchCond
+    preLatch (.seq (.assign i (.sub (.var i) (.lit 1))) postLatch) hda hd₁a hd₂a hdd₁ hdd₂
+    hd₁d₂ hPreD hPreD₁ hPreD₂ hPostD' hPostD₁' hPostD₂'
+  have hinit : stmtWritesVar i
+      (mkBranchDivLoop x w z d d₁ d₂ i acc branchCond num y preLatch postLatch).init = false := by
+    simp [mkBranchDivLoop, stmtWritesVar, Ne.symm hid, Ne.symm hid₁, Ne.symm hid₂]
+  have hbranch : stmtWritesVar i
+      (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) = false := by
+    simp [stmtWritesVar, Ne.symm hid]
+  obtain ⟨h1, h2, h3, h4, _⟩ := optimizeLoop_dualDiv_elim
+    (ctx := .conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+    (w := mkBranchDivLoop x w z d d₁ d₂ i acc branchCond num y preLatch postLatch) (i := i)
+    (d := d) rfl rfl rfl hs
+    ⟨fun _ => 1, hpos.eval (fun _ _ => by decide)⟩
+    (hoistLoopGuardIR_assign3_of_pos hpos x w z)
+    (execStmt_dec_after_acc hia
+      (execStmt_dec_seq_left (i := i) (A := preLatch) hPreI
+        (execStmt_dec_seq_left (i := i)
+          (A := .ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) hbranch
+          (execStmt_dec_seq_right (i := i) (B := postLatch) (execStmt_dec_assign i) hPostI))))
+    n env hctx ((execStmt_of_not_writes hinit env).trans hi)
+  exact ⟨h1, h2, h3, Nat.le_of_eq h4.symm⟩
+
 end CatSem

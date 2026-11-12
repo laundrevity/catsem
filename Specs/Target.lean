@@ -627,4 +627,436 @@ theorem optimizeBlock_dead_branch_elim_param (p : PureExpr) (d : VarId)
       execBlockCheckCost env (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)) = 0 := by
   sorry
 
+/-! ## Milestone 3: Fuel-Indexed Imperative Loops, Inductive Strengthening & Preheader Guard Hoisting -/
+
+/-- Computable conservative universal-quantification pullback of a `GuardIR` across a write to `v`. -/
+def havocGuardIR (v : VarId) (g : GuardIR) : GuardIR :=
+  sorry
+
+/-- Computable bounded backward inductive-invariant strengthening across `(accVar, latch)` for `target`. -/
+def strengthenLoopInvariantIR (accVar : VarId) (latch : Stmt) (target : GuardIR) : Option GuardIR :=
+  sorry
+
+/-- Computable preheader loop-hoisted guard synthesis across `init` from `ctx` to `inv`. -/
+def hoistLoopGuardIR (init : Stmt) (ctx inv : GuardIR) : GuardIR :=
+  sorry
+
+/-- Computable context-sensitive loop optimizer performing inductive invariant strengthening,
+    preheader guard hoisting / loop versioning, and loop-body check elimination. -/
+def optimizeLoop (ctx : GuardIR) (prog : LoopProg) : LoopProg :=
+  sorry
+
+/-- Iterated State-Transfer Pullback Characterization: The `n`-fold `CFGTransfer.iterate` pullback
+    of `stateTransfer step` at `Q` and `s` holds if and only if `Q (step^[n] s)` holds. -/
+theorem stateTransfer_iterate_pullback_iff (step : S → S) (Q : S → Prop) (n : ℕ) (s : S) :
+    ((stateTransfer step).iterate n).pullback Q s ↔ Q (step^[n] s) := by
+  sorry
+
+/-- Soundness of `havocGuardIR`: Denotation implies the semantic universal pullback `(havocTransfer v).pullback`. -/
+theorem havocGuardIR_sound (v : VarId) (g : GuardIR) :
+    denoteGuard (havocGuardIR v g) ≤ (havocTransfer v).pullback (denoteGuard g) := by
+  sorry
+
+/-- Exactness of `havocGuardIR` on Non-Mentioning Guards: When `guardMentionsVar v g = false`,
+    `havocGuardIR v g` denotes the exact semantic pullback `(havocTransfer v).pullback (denoteGuard g)`. -/
+theorem havocGuardIR_exact_of_nonMention (v : VarId) (g : GuardIR)
+    (h : guardMentionsVar v g = false) :
+    denoteGuard (havocGuardIR v g) = (havocTransfer v).pullback (denoteGuard g) := by
+  sorry
+
+/-- Categorical Inductive Soundness of `strengthenLoopInvariantIR`: Any synthesized `some inv`
+    satisfies `IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target)`. -/
+theorem strengthenLoopInvariantIR_inductive (accVar : VarId) (latch : Stmt)
+    (target inv : GuardIR) (h : strengthenLoopInvariantIR accVar latch target = some inv) :
+    IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target) := by
+  sorry
+
+/-- Stationary Divisor Strengthening Completeness: When `d` is distinct from `accVar` and `i`,
+    `strengthenLoopInvariantIR` succeeds on `i := i - 1` for `.nonZero (.var d)`. -/
+theorem strengthenLoopInvariantIR_stationary (accVar d i : VarId)
+    (hda : d ≠ accVar) (hdi : d ≠ i) :
+    ∃ inv, strengthenLoopInvariantIR accVar (.assign i (.sub (.var i) (.lit 1))) (.nonZero (.var d)) = some inv := by
+  sorry
+
+/-- Two-Stage Pipeline Divisor Strengthening Completeness: Across `d := nextD; i := i - 1`,
+    `strengthenLoopInvariantIR` strengthens `.nonZero (.var d)` to a genuine inductive invariant `some inv`. -/
+theorem strengthenLoopInvariantIR_pipeline (accVar d nextD i : VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i (.sub (.var i) (.lit 1))))
+        (.nonZero (.var d)) = some inv := by
+  sorry
+
+/-- Categorical Realization of `hoistLoopGuardIR`: Denotation commutes with abstract `hoistLoopGuard`
+    along `stateTransfer (execStmt init)`. -/
+theorem hoistLoopGuardIR_denote (init : Stmt) (ctx inv : GuardIR) :
+    denoteGuard (hoistLoopGuardIR init ctx inv) =
+      hoistLoopGuard (stateTransfer (execStmt init)) (denoteGuard ctx) (denoteGuard inv) := by
+  sorry
+
+/-- Arbitrary-Iteration Target Soundness of `hoistLoopGuardIR`: Given an inductive invariant `inv`
+    for `target` under `loopStepTransfer accVar latch`, conjoining `ctx` with `hoistLoopGuardIR init ctx inv`
+    establishes `target` after `init` and `n` abstract loop iterations for every `n : ℕ`. -/
+theorem hoistLoopGuardIR_iterate_target (init : Stmt) (accVar : VarId) (latch : Stmt)
+    (ctx target inv : GuardIR)
+    (hInd : IsInductiveFor (loopStepTransfer accVar latch) (denoteGuard inv) (denoteGuard target))
+    (n : ℕ) :
+    (((stateTransfer (execStmt init)).comp ((loopStepTransfer accVar latch).iterate n)).post
+      (denoteGuard ctx ⊓ denoteGuard (hoistLoopGuardIR init ctx inv))) ≤ denoteGuard target := by
+  sorry
+
+/-- Fuel-Indexed Stage-Guarded Soundness of `optimizeLoop` via `GuardedEquiv` and `liftEval (evalLoop fuel)`. -/
+theorem optimizeLoop_guardedEquiv (fuel : Nat) (ctx : GuardIR) (prog : LoopProg) :
+    GuardedEquiv (liftEval (evalLoop fuel)) (denoteGuard ctx) (optimizeLoop ctx prog) prog := by
+  sorry
+
+/-- Fuel-Indexed Concrete Operational Soundness of `optimizeLoop`: For every `fuel` and `env`
+    satisfying `ctx`, `optimizeLoop ctx prog` evaluates to the exact same `LoopOutcome` as `prog`. -/
+theorem optimizeLoop_sound (fuel : Nat) (ctx : GuardIR) (prog : LoopProg) (env : Env) :
+    evalGuard env ctx = true → evalLoop fuel env (optimizeLoop ctx prog) = evalLoop fuel env prog := by
+  sorry
+
+/-- Parametric Known-Context Loop Check Elimination: Under `.nonZero (.var x)` across `n` counted
+    iterations, `optimizeLoop` eliminates all checked divisions and loop-version branches and reduces
+    dynamic check cost from `3 * n + 1` to `n + 1` (only the `n + 1` loop condition evaluations). -/
+theorem optimizeLoop_known_ctx_elim_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n) (hx : evalGuard env (.nonZero (.var x)) = true) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    let opt := optimizeLoop (.nonZero (.var x)) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt = n + 1 ∧
+      execLoopCheckCost (n + 1) env src = 3 * n + 1 := by
+  sorry
+
+/-- Parametric Unknown-Context Preheader Hoisting: Under `.top` when `env x ≠ 0` across `n` counted
+    iterations, `optimizeLoop` hoists the divisor check out of the loop to the preheader, reducing
+    dynamic check cost from `3 * n + 1` to `≤ n + 2`. -/
+theorem optimizeLoop_unknown_ctx_hoist_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n) (hx : env x ≠ 0) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    let opt := optimizeLoop .top src
+    execLoopCheckCost (n + 1) env opt ≤ n + 2 ∧
+      execLoopCheckCost (n + 1) env src = 3 * n + 1 := by
+  sorry
+
+/-- Parametric Zero-Divisor Preheader Safety (0 Iterations vs ≥1 Iterations): Under `.top` when `x = 0`,
+    `optimizeLoop .top` returns `.done (.val (env₀ acc))` when the loop executes `0` iterations (`i = 0`)
+    and safely returns `.done .trap` when the loop executes `n + 1` iterations (`i = n + 1`). -/
+theorem optimizeLoop_zero_div_behavior_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (n : Nat) (env₀ env₁ : Env)
+    (hx₀ : env₀ x = 0) (hi₀ : env₀ i = 0)
+    (hx₁ : env₁ x = 0) (hi₁ : env₁ i = Int.ofNat (n + 1)) :
+    let src := LoopProg.whileLoop (mkCountedDivLoop x d i acc num y)
+    evalLoop 1 env₀ (optimizeLoop .top src) = .done (.val (env₀ acc)) ∧
+      evalLoop (n + 2) env₁ (optimizeLoop .top src) = .done .trap := by
+  sorry
+
+/-- Parametric Two-Stage Pipeline Inductive Strengthening Elimination: Under `x ≠ 0 ∧ z ≠ 0`,
+    `optimizeLoop` strengthens `d ≠ 0` to `d ≠ 0 ∧ nextD ≠ 0` across `d := nextD; i := i - 1`,
+    eliminates all checked divisions and loop-version branches, and achieves check cost `n + 1`. -/
+theorem optimizeLoop_pipeline_elim_param (x z d nextD i acc : VarId)
+    (hda : d ≠ acc) (hna : nextD ≠ acc)
+    (hid : i ≠ d) (hin : i ≠ nextD) (hia : i ≠ acc) (hdn : d ≠ nextD)
+    (num y : PureExpr) (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := LoopProg.whileLoop (mkPipelineDivLoop x z d nextD i acc num y)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt = n + 1 := by
+  sorry
+
+/-- Parametric Non-Invariant Decrementing-Divisor Trap Preservation: Even when `init` sets `d := 1`
+    (`x = 1 ≠ 0`), `d := d - 1` violates loop invariance on iteration 2 (`i = 2`), so `optimizeLoop`
+    must preserve `.done .trap` (rejecting naive entry-only check elimination). -/
+theorem optimizeLoop_decrement_div_trap_param (x d i acc : VarId)
+    (hda : d ≠ acc) (hia : i ≠ acc) (hid : i ≠ d)
+    (num : PureExpr) (env : Env) (hx : env x = 1) (hi : env i = 2) :
+    evalLoop 3 env (optimizeLoop (.nonZero (.var x)) (.whileLoop (mkDecrementDivisorLoop x d i acc num))) =
+      .done .trap := by
+  sorry
+
+/-- Non-Vacuous Stationary Divisor Strengthening & Preheader Discharge:
+    Across `i := stepRhs` for arbitrary `stepRhs : PureExpr`, `strengthenLoopInvariantIR` returns
+    `some inv` covering all environments with `env d ≠ 0` and discharging to `.top` across
+    `d := x` under `.nonZero (.var x)` (ruling out vacuous `some .bot` and fixture-only latches). -/
+theorem strengthenLoopInvariantIR_stationary_safe (accVar d i : VarId)
+    (hda : d ≠ accVar) (hdi : d ≠ i) (stepRhs : PureExpr) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar (.assign i stepRhs) (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x : VarId, hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) := by
+  sorry
+
+/-- Non-Vacuous Pipeline Divisor Strengthening & Preheader Discharge:
+    Across `d := nextD; i := stepRhs` for arbitrary `stepRhs : PureExpr`, `strengthenLoopInvariantIR`
+    returns `some inv` covering all environments with `env d ≠ 0 ∧ env nextD ≠ 0` and discharging
+    to `.top` across `d := x; nextD := z` under `x ≠ 0 ∧ z ≠ 0` (ruling out vacuous `some .bot`
+    and fixture-only pipeline latches). -/
+theorem strengthenLoopInvariantIR_pipeline_safe (accVar d nextD i : VarId)
+    (hda : d ≠ accVar) (hna : nextD ≠ accVar)
+    (hdi : d ≠ i) (hni : nextD ≠ i) (hdn : d ≠ nextD) (stepRhs : PureExpr) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq (.assign d (.var nextD)) (.assign i stepRhs))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env nextD ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign nextD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) := by
+  sorry
+
+/-- General One-Step Inductive Strengthening Completeness & Non-Vacuity:
+    For arbitrary `accVar`, `latch`, and `target`, whenever `cand := GuardIR.conj target g₁`
+    (with `g₁ := havocGuardIR accVar (pullbackGuardIR latch target)`) closes in one step under
+    `synthesizeGuardIR`, `strengthenLoopInvariantIR` succeeds with `some inv` covering `target ∧ g₁`. -/
+theorem strengthenLoopInvariantIR_step_complete (accVar : VarId) (latch : Stmt) (target : GuardIR) :
+    let g₁ := havocGuardIR accVar (pullbackGuardIR latch target)
+    let cand := GuardIR.conj target g₁
+    synthesizeGuardIR cand (havocGuardIR accVar (pullbackGuardIR latch cand)) = .top →
+      ∃ inv,
+        strengthenLoopInvariantIR accVar latch target = some inv ∧
+        (∀ env : Env, evalGuard env target = true → evalGuard env g₁ = true → evalGuard env inv = true) := by
+  sorry
+
+/-- Syntactic Transparency of `havocGuardIR` on Non-Mentioning Guards:
+    When `guardMentionsVar v g = false`, `havocGuardIR v g` returns `g` unchanged without
+    injecting unnormalized wrapper syntax. -/
+theorem havocGuardIR_nonMention_eq (v : VarId) (g : GuardIR)
+    (h : guardMentionsVar v g = false) :
+    havocGuardIR v g = g := by
+  sorry
+
+/-- Unconditional Frame-Preserving `Stmt` Strengthening & Preheader Discharge:
+    For ANY `latch : Stmt` built from `skip`/`assign`/`seq`/`ite` that writes neither `d`
+    nor `accVar` (`stmtWritesVar d latch = false`, `stmtWritesVar accVar latch = false`),
+    `strengthenLoopInvariantIR` returns `some inv` covering all environments with `env d ≠ 0`
+    and discharging to `.top` across `d := x` under `.nonZero (.var x)`. -/
+theorem strengthenLoopInvariantIR_frame_stmt_safe (accVar d : VarId) (latch : Stmt)
+    (hda : d ≠ accVar)
+    (hdWrite : stmtWritesVar d latch = false)
+    (haWrite : stmtWritesVar accVar latch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar latch (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x : VarId, hoistLoopGuardIR (.assign d (.var x)) (.nonZero (.var x)) inv = .top) := by
+  sorry
+
+/-- Unconditional Variable-Swap Latch Strengthening & Preheader Discharge:
+    Across `preLatch; tmp := d; d := altD; altD := tmp; postLatch` for arbitrary frame-preserving
+    surrounding statements `preLatch` and `postLatch`, `strengthenLoopInvariantIR` returns `some inv`
+    covering `env d ≠ 0 ∧ env altD ≠ 0` and discharging to `.top` across `d := x; altD := z`. -/
+theorem strengthenLoopInvariantIR_swap_safe (accVar d altD tmp : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hala : altD ≠ accVar) (hta : tmp ≠ accVar)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreAlt : stmtWritesVar altD preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostAlt : stmtWritesVar altD postLatch = false)
+    (hPostTmp : stmtWritesVar tmp postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign tmp (.var d))
+            (.seq (.assign d (.var altD))
+              (.seq (.assign altD (.var tmp)) postLatch))))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env altD ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.assign altD (.var z)))
+          (.conj (.nonZero (.var x)) (.nonZero (.var z)))
+          inv = .top) := by
+  sorry
+
+/-- Unconditional Three-Stage Pipeline Strengthening & Preheader Discharge:
+    Across `preLatch; d := d₁; d₁ := d₂; postLatch` for arbitrary frame-preserving surrounding
+    statements `preLatch` and `postLatch`, `strengthenLoopInvariantIR` strengthens `.nonZero (.var d)`
+    across multiple backward steps to `some inv` covering `env d ≠ 0 ∧ env d₁ ≠ 0 ∧ env d₂ ≠ 0`
+    and discharging to `.top` across `d := x; d₁ := w; d₂ := z`. -/
+theorem strengthenLoopInvariantIR_pipeline3_safe (accVar d d₁ d₂ : VarId)
+    (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.assign d (.var d₁))
+            (.seq (.assign d₁ (.var d₂)) postLatch)))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x w z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) := by
+  sorry
+
+/-- Unconditional Branching-`ite` Latch Strengthening & Preheader Discharge:
+    Across `preLatch; if branchCond { d := d₁ } else { d := d₂ }; postLatch` for arbitrary
+    `branchCond : GuardIR` and arbitrary frame-preserving surrounding statements `preLatch` and
+    `postLatch`, `strengthenLoopInvariantIR` returns `some inv` covering
+    `env d ≠ 0 ∧ env d₁ ≠ 0 ∧ env d₂ ≠ 0` and discharging to `.top` across `d := x; d₁ := w; d₂ := z`. -/
+theorem strengthenLoopInvariantIR_ite_branch_safe (accVar d d₁ d₂ : VarId)
+    (branchCond : GuardIR) (preLatch postLatch : Stmt)
+    (hda : d ≠ accVar) (hd₁a : d₁ ≠ accVar) (hd₂a : d₂ ≠ accVar)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreAcc : stmtWritesVar accVar preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostAcc : stmtWritesVar accVar postLatch = false) :
+    ∃ inv,
+      strengthenLoopInvariantIR accVar
+        (.seq preLatch
+          (.seq (.ite branchCond (.assign d (.var d₁)) (.assign d (.var d₂))) postLatch))
+        (.nonZero (.var d)) = some inv ∧
+      (∀ env : Env, env d ≠ 0 → env d₁ ≠ 0 → env d₂ ≠ 0 → evalGuard env inv = true) ∧
+      (∀ x w z : VarId,
+        hoistLoopGuardIR
+          (.seq (.assign d (.var x)) (.seq (.assign d₁ (.var w)) (.assign d₂ (.var z))))
+          (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z))))
+          inv = .top) := by
+  sorry
+
+/-- Parametric Frame-Preserving Surrounding-`Stmt` Loop Check Elimination:
+    Under `.nonZero (.var x)` across `n` counted iterations with arbitrary frame-preserving
+    `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked divisions and loop-version
+    branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_frame_stmt_elim_param (x d i acc : VarId)
+    (hid : i ≠ d) (hia : i ≠ acc) (hda : d ≠ acc)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hx : evalGuard env (.nonZero (.var x)) = true) :
+    let src := LoopProg.whileLoop (mkFrameStmtDivLoop x d i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.nonZero (.var x)) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  sorry
+
+/-- Parametric Variable-Swap Latch Loop Check Elimination:
+    Under `x ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkSwapDivLoop` with arbitrary
+    frame-preserving `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked divisions
+    and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_swap_elim_param (x z d altD tmp i acc : VarId)
+    (hda : d ≠ acc) (hala : altD ≠ acc) (hta : tmp ≠ acc)
+    (hid : i ≠ d) (hial : i ≠ altD) (hit : i ≠ tmp) (hia : i ≠ acc)
+    (hdal : d ≠ altD) (hdt : d ≠ tmp) (halt : altD ≠ tmp)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreAlt : stmtWritesVar altD preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostAlt : stmtWritesVar altD postLatch = false)
+    (hPostTmp : stmtWritesVar tmp postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.nonZero (.var z))) = true) :
+    let src := LoopProg.whileLoop (mkSwapDivLoop x z d altD tmp i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.nonZero (.var z))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  sorry
+
+/-- Parametric Three-Stage Pipeline Loop Check Elimination:
+    Under `x ≠ 0 ∧ w ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkPipeline3DivLoop` with
+    arbitrary frame-preserving `preLatch` and `postLatch`, `optimizeLoop` eliminates all checked
+    divisions and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_pipeline3_elim_param (x w z d d₁ d₂ i acc : VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := LoopProg.whileLoop (mkPipeline3DivLoop x w z d d₁ d₂ i acc num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  sorry
+
+/-- Parametric Branching-`ite` Latch Loop Check Elimination:
+    Under `x ≠ 0 ∧ w ≠ 0 ∧ z ≠ 0` across `n` counted iterations of `mkBranchDivLoop` for arbitrary
+    `branchCond : GuardIR` and arbitrary frame-preserving `preLatch` and `postLatch`, `optimizeLoop`
+    eliminates all checked divisions and loop-version branches and saves at least `2 * n` runtime checks. -/
+theorem optimizeLoop_ite_branch_elim_param (x w z d d₁ d₂ i acc : VarId)
+    (hda : d ≠ acc) (hd₁a : d₁ ≠ acc) (hd₂a : d₂ ≠ acc)
+    (hid : i ≠ d) (hid₁ : i ≠ d₁) (hid₂ : i ≠ d₂) (hia : i ≠ acc)
+    (hdd₁ : d ≠ d₁) (hdd₂ : d ≠ d₂) (hd₁d₂ : d₁ ≠ d₂)
+    (branchCond : GuardIR) (num y : PureExpr) (preLatch postLatch : Stmt)
+    (hPreD : stmtWritesVar d preLatch = false)
+    (hPreD₁ : stmtWritesVar d₁ preLatch = false)
+    (hPreD₂ : stmtWritesVar d₂ preLatch = false)
+    (hPreI : stmtWritesVar i preLatch = false)
+    (hPreAcc : stmtWritesVar acc preLatch = false)
+    (hPostD : stmtWritesVar d postLatch = false)
+    (hPostD₁ : stmtWritesVar d₁ postLatch = false)
+    (hPostD₂ : stmtWritesVar d₂ postLatch = false)
+    (hPostI : stmtWritesVar i postLatch = false)
+    (hPostAcc : stmtWritesVar acc postLatch = false)
+    (n : Nat) (env : Env)
+    (hi : env i = Int.ofNat n)
+    (hctx : evalGuard env (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) = true) :
+    let src := LoopProg.whileLoop (mkBranchDivLoop x w z d d₁ d₂ i acc branchCond num y preLatch postLatch)
+    let opt := optimizeLoop (.conj (.nonZero (.var x)) (.conj (.nonZero (.var w)) (.nonZero (.var z)))) src
+    loopCheckedDivCount opt = 0 ∧
+      loopDivOpCount opt ≤ 1 ∧
+      loopBranchCount opt = 0 ∧
+      execLoopCheckCost (n + 1) env opt + 2 * n ≤ execLoopCheckCost (n + 1) env src := by
+  sorry
+
 end CatSem
