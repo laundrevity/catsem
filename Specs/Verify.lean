@@ -53,6 +53,14 @@ elab "#verify_allowed_axioms " id:ident : command => do
 #verify_allowed_axioms CatSem.mkDualDivExpr
 #verify_allowed_axioms CatSem.m1CancelExpr
 #verify_allowed_axioms CatSem.m1BenchExpr
+#verify_allowed_axioms CatSem.updateEnv
+#verify_allowed_axioms CatSem.execStmt
+#verify_allowed_axioms CatSem.evalBlock
+#verify_allowed_axioms CatSem.stmtGuardCost
+#verify_allowed_axioms CatSem.execBlockCheckCost
+#verify_allowed_axioms CatSem.mkClobberBlock
+#verify_allowed_axioms CatSem.mkDiamondSafeBlock
+#verify_allowed_axioms CatSem.mkDeadBranchBlock
 
 -- Fails to compile if Proofs/Submission.lean altered any theorem name or signature
 example {α : Type*} [HeytingAlgebra α] (a b : α) :
@@ -431,6 +439,115 @@ example (x y d : CatSem.PureExpr) (env : CatSem.Env) (h : CatSem.evalPure env d 
     CatSem.evalExpr env (CatSem.optimizeExpr .top (CatSem.mkDualDivExpr x y d)) = .trap :=
   CatSem.optimizeExpr_zero_div_trap_param x y d env h
 
+-- Milestone 2 computability & signature checks (rejects `noncomputable` implementations)
+def _computable_pullbackGuardIR : Stmt → GuardIR → GuardIR :=
+  CatSem.pullbackGuardIR
+
+def _computable_synthesizeStmtGuardIR : Stmt → GuardIR → GuardIR → GuardIR :=
+  CatSem.synthesizeStmtGuardIR
+
+def _computable_optimizeBlock : GuardIR → BlockProg → BlockProg :=
+  CatSem.optimizeBlock
+
+example {S₁ S₂ Term Out : Type*}
+    (step : S₁ → S₂) (run : S₂ → Term → Out) (P : S₁ → Prop) (t₁ t₂ : Term) :
+    CatSem.GuardedEquiv (CatSem.pullbackEval (CatSem.stateTransfer step) (CatSem.liftEval run)) P t₁ t₂ ↔
+      ∀ s, P s → run (step s) t₁ = run (step s) t₂ :=
+  CatSem.pullbackEval_stateTransfer_liftEval_iff step run P t₁ t₂
+
+example (s : CatSem.Stmt) (g : CatSem.GuardIR) :
+    CatSem.denoteGuard (CatSem.pullbackGuardIR s g) =
+      (CatSem.stateTransfer (CatSem.execStmt s)).pullback (CatSem.denoteGuard g) :=
+  CatSem.pullbackGuardIR_denote s g
+
+example (s₁ s₂ : CatSem.Stmt) (g : CatSem.GuardIR) :
+    CatSem.denoteGuard (CatSem.pullbackGuardIR (.seq s₁ s₂) g) =
+      ((CatSem.stateTransfer (CatSem.execStmt s₁)).comp
+        (CatSem.stateTransfer (CatSem.execStmt s₂))).pullback (CatSem.denoteGuard g) :=
+  CatSem.pullbackGuardIR_seq s₁ s₂ g
+
+example (s : CatSem.Stmt) (a b : CatSem.GuardIR) :
+    CatSem.denoteGuard (CatSem.synthesizeStmtGuardIR s a b) =
+      CatSem.synthesizeEdgeGuard (CatSem.stateTransfer (CatSem.execStmt s))
+        (CatSem.denoteGuard a) (CatSem.denoteGuard b) :=
+  CatSem.synthesizeStmtGuardIR_denote s a b
+
+example (s : CatSem.Stmt) (a b : CatSem.GuardIR) (g : CatSem.Env → Prop) :
+    CatSem.ForcesAfter (CatSem.stateTransfer (CatSem.execStmt s))
+      (CatSem.denoteGuard a ⊓ g) (CatSem.denoteGuard b) ↔
+      g ≤ CatSem.denoteGuard (CatSem.synthesizeStmtGuardIR s a b) :=
+  CatSem.synthesizeStmtGuardIR_universal s a b g
+
+example (s₁ s₂ : CatSem.Stmt) (ctx req : CatSem.GuardIR)
+    (e₁ e₂ : CatSem.Expr)
+    (h : CatSem.GuardedEquiv (CatSem.liftEval CatSem.evalExpr) (CatSem.denoteGuard req) e₁ e₂) :
+    let g := CatSem.GuardIR.conj
+      (CatSem.synthesizeStmtGuardIR s₁ ctx req)
+      (CatSem.synthesizeStmtGuardIR s₂ ctx req)
+    ∀ env : CatSem.Env, CatSem.evalGuard env ctx = true → CatSem.evalGuard env g = true →
+      CatSem.evalExpr (CatSem.execStmt s₁ env) e₁ = CatSem.evalExpr (CatSem.execStmt s₁ env) e₂ ∧
+        CatSem.evalExpr (CatSem.execStmt s₂ env) e₁ = CatSem.evalExpr (CatSem.execStmt s₂ env) e₂ :=
+  CatSem.synthesizeStmtGuardIR_diamond_sound s₁ s₂ ctx req e₁ e₂ h
+
+example (n : Int) (hn : n ≠ 0) :
+    CatSem.synthesizeStmtGuardIR .skip .top (.nonZero (.lit n)) = .top :=
+  CatSem.synthesizeStmtGuardIR_lit_nonZero n hn
+
+example (v : CatSem.VarId) (rhs : CatSem.PureExpr) :
+    CatSem.synthesizeStmtGuardIR (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top :=
+  CatSem.synthesizeStmtGuardIR_assign_self v rhs
+
+example (x d : CatSem.VarId) (n : Int) (hn : n ≠ 0) :
+    CatSem.synthesizeStmtGuardIR
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      .top (.nonZero (.var d)) = .top :=
+  CatSem.synthesizeStmtGuardIR_diamond_safe x d n hn
+
+example (ctx : CatSem.GuardIR) (prog : CatSem.BlockProg) :
+    CatSem.GuardedEquiv (CatSem.liftEval CatSem.evalBlock) (CatSem.denoteGuard ctx)
+      (CatSem.optimizeBlock ctx prog) prog :=
+  CatSem.optimizeBlock_guardedEquiv ctx prog
+
+example (ctx : CatSem.GuardIR) (prog : CatSem.BlockProg) (env : CatSem.Env) :
+    CatSem.evalGuard env ctx = true →
+      CatSem.evalBlock env (CatSem.optimizeBlock ctx prog) = CatSem.evalBlock env prog :=
+  CatSem.optimizeBlock_sound ctx prog env
+
+example (num y : CatSem.PureExpr) (n : Int) (hn : n ≠ 0) (env : CatSem.Env) :
+    let prog : CatSem.BlockProg := { body := .skip, ret := CatSem.mkDualDivExpr num y (.lit n) }
+    CatSem.checkedDivCount (CatSem.optimizeBlock .top prog).ret = 0 ∧
+      CatSem.divOpCount (CatSem.optimizeBlock .top prog).ret ≤ 1 ∧
+      CatSem.guardBranchCount (CatSem.optimizeBlock .top prog).ret = 0 ∧
+      CatSem.execBlockCheckCost env (CatSem.optimizeBlock .top prog) = 0 :=
+  CatSem.optimizeBlock_literal_div_elim_param num y n hn env
+
+example (x d : CatSem.VarId) (hxd : d ≠ x) (num y : CatSem.PureExpr) (env : CatSem.Env) :
+    CatSem.checkedDivCount (CatSem.optimizeBlock (.nonZero (.var x)) (CatSem.mkClobberBlock x d num y d)).ret = 0 ∧
+      CatSem.divOpCount (CatSem.optimizeBlock (.nonZero (.var x)) (CatSem.mkClobberBlock x d num y d)).ret ≤ 1 ∧
+      CatSem.guardBranchCount (CatSem.optimizeBlock (.nonZero (.var x)) (CatSem.mkClobberBlock x d num y d)).ret = 0 ∧
+      CatSem.execBlockCheckCost env (CatSem.optimizeBlock (.nonZero (.var x)) (CatSem.mkClobberBlock x d num y d)) = 0 :=
+  CatSem.optimizeBlock_seq_clobber_elim_param x d hxd num y env
+
+example (x d : CatSem.VarId) (num y : CatSem.PureExpr) (env : CatSem.Env)
+    (hx : CatSem.evalGuard env (.nonZero (.var x)) = true) :
+    CatSem.evalBlock env (CatSem.optimizeBlock (.nonZero (.var x)) (CatSem.mkClobberBlock x d num y x)) = .trap :=
+  CatSem.optimizeBlock_clobber_trap_param x d num y env hx
+
+example (x d : CatSem.VarId) (n : Int) (hn : n ≠ 0) (num y : CatSem.PureExpr) (env : CatSem.Env) :
+    CatSem.checkedDivCount (CatSem.optimizeBlock .top (CatSem.mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      CatSem.divOpCount (CatSem.optimizeBlock .top (CatSem.mkDiamondSafeBlock x d n num y)).ret ≤ 1 ∧
+      CatSem.guardBranchCount (CatSem.optimizeBlock .top (CatSem.mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      CatSem.execBlockCheckCost env (CatSem.optimizeBlock .top (CatSem.mkDiamondSafeBlock x d n num y)) ≤ 1 ∧
+      CatSem.execBlockCheckCost env (CatSem.mkDiamondSafeBlock x d n num y) = 3 :=
+  CatSem.optimizeBlock_diamond_elim_param x d n hn num y env
+
+example (p : CatSem.PureExpr) (d : CatSem.VarId) (n : Int) (hn : n ≠ 0)
+    (y : CatSem.PureExpr) (env : CatSem.Env) :
+    CatSem.checkedDivCount (CatSem.optimizeBlock (.nonZero p) (CatSem.mkDeadBranchBlock p d n y)).ret = 0 ∧
+      CatSem.divOpCount (CatSem.optimizeBlock (.nonZero p) (CatSem.mkDeadBranchBlock p d n y)).ret = 0 ∧
+      CatSem.execBlockCheckCost env (CatSem.optimizeBlock (.nonZero p) (CatSem.mkDeadBranchBlock p d n y)) = 0 :=
+  CatSem.optimizeBlock_dead_branch_elim_param p d n hn y env
+
 #print axioms CatSem.synthesizeGuard
 #print axioms CatSem.synthesizeEdgeGuard
 #print axioms CatSem.CFGTransfer.id
@@ -462,8 +579,19 @@ example (x y d : CatSem.PureExpr) (env : CatSem.Env) (h : CatSem.evalPure env d 
 #print axioms CatSem.mkDualDivExpr
 #print axioms CatSem.m1CancelExpr
 #print axioms CatSem.m1BenchExpr
+#print axioms CatSem.updateEnv
+#print axioms CatSem.execStmt
+#print axioms CatSem.evalBlock
+#print axioms CatSem.stmtGuardCost
+#print axioms CatSem.execBlockCheckCost
+#print axioms CatSem.mkClobberBlock
+#print axioms CatSem.mkDiamondSafeBlock
+#print axioms CatSem.mkDeadBranchBlock
 #print axioms CatSem.synthesizeGuardIR
 #print axioms CatSem.optimizeExpr
+#print axioms CatSem.pullbackGuardIR
+#print axioms CatSem.synthesizeStmtGuardIR
+#print axioms CatSem.optimizeBlock
 #print axioms CatSem.synthesizeGuard_sound
 #print axioms CatSem.synthesizeGuard_weakest
 #print axioms CatSem.synthesizeGuard_adjunction
@@ -530,10 +658,29 @@ example (x y d : CatSem.PureExpr) (env : CatSem.Env) (h : CatSem.evalPure env d 
 #print axioms CatSem.optimizeExpr_known_ctx_elim_param
 #print axioms CatSem.optimizeExpr_unknown_ctx_dedup_param
 #print axioms CatSem.optimizeExpr_zero_div_trap_param
+#print axioms CatSem.pullbackEval_stateTransfer_liftEval_iff
+#print axioms CatSem.pullbackGuardIR_denote
+#print axioms CatSem.pullbackGuardIR_seq
+#print axioms CatSem.synthesizeStmtGuardIR_denote
+#print axioms CatSem.synthesizeStmtGuardIR_universal
+#print axioms CatSem.synthesizeStmtGuardIR_diamond_sound
+#print axioms CatSem.synthesizeStmtGuardIR_lit_nonZero
+#print axioms CatSem.synthesizeStmtGuardIR_assign_self
+#print axioms CatSem.synthesizeStmtGuardIR_diamond_safe
+#print axioms CatSem.optimizeBlock_guardedEquiv
+#print axioms CatSem.optimizeBlock_sound
+#print axioms CatSem.optimizeBlock_literal_div_elim_param
+#print axioms CatSem.optimizeBlock_seq_clobber_elim_param
+#print axioms CatSem.optimizeBlock_clobber_trap_param
+#print axioms CatSem.optimizeBlock_diamond_elim_param
+#print axioms CatSem.optimizeBlock_dead_branch_elim_param
 
--- In-kernel transitive axiom allowlist audit on compiler passes and all Rounds 1–11 + Milestone 1 theorems
+-- In-kernel transitive axiom allowlist audit on compiler passes and all Rounds 1–11 + Milestones 1–2 theorems
 #verify_allowed_axioms CatSem.synthesizeGuardIR
 #verify_allowed_axioms CatSem.optimizeExpr
+#verify_allowed_axioms CatSem.pullbackGuardIR
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR
+#verify_allowed_axioms CatSem.optimizeBlock
 #verify_allowed_axioms CatSem.synthesizeGuard_sound
 #verify_allowed_axioms CatSem.synthesizeGuard_weakest
 #verify_allowed_axioms CatSem.synthesizeGuard_adjunction
@@ -600,5 +747,21 @@ example (x y d : CatSem.PureExpr) (env : CatSem.Env) (h : CatSem.evalPure env d 
 #verify_allowed_axioms CatSem.optimizeExpr_known_ctx_elim_param
 #verify_allowed_axioms CatSem.optimizeExpr_unknown_ctx_dedup_param
 #verify_allowed_axioms CatSem.optimizeExpr_zero_div_trap_param
+#verify_allowed_axioms CatSem.pullbackEval_stateTransfer_liftEval_iff
+#verify_allowed_axioms CatSem.pullbackGuardIR_denote
+#verify_allowed_axioms CatSem.pullbackGuardIR_seq
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_denote
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_universal
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_diamond_sound
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_lit_nonZero
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_assign_self
+#verify_allowed_axioms CatSem.synthesizeStmtGuardIR_diamond_safe
+#verify_allowed_axioms CatSem.optimizeBlock_guardedEquiv
+#verify_allowed_axioms CatSem.optimizeBlock_sound
+#verify_allowed_axioms CatSem.optimizeBlock_literal_div_elim_param
+#verify_allowed_axioms CatSem.optimizeBlock_seq_clobber_elim_param
+#verify_allowed_axioms CatSem.optimizeBlock_clobber_trap_param
+#verify_allowed_axioms CatSem.optimizeBlock_diamond_elim_param
+#verify_allowed_axioms CatSem.optimizeBlock_dead_branch_elim_param
 
 end CatSem.Verify

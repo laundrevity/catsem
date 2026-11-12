@@ -1541,4 +1541,880 @@ theorem optimizeExpr_zero_div_trap_param (x y d : PureExpr) (env : Env)
   rw [optimizeExpr_sound .top (mkDualDivExpr x y d) env rfl]
   exact evalExpr_mkDualDivExpr_trap x y h
 
+/-! ## Milestone 2: Imperative CFG Statements, Syntactic Pullbacks & Diamond Block Optimization -/
+
+/-! ### Arithmetic-aware guard normalisation
+
+Unlike the Milestone 1 normaliser, which treats atoms as opaque, `GuardIR.norm` evaluates
+literal atoms, splits `nonZero (a * b)` into `nonZero a ∧ nonZero b`, rewrites `e = 0` as
+`¬ nonZero e`, and removes double negations. Every rule is an equivalence, so the result
+can be used both as a hypothesis and as a target. -/
+
+/-- Constant folding of pure arithmetic. -/
+private def PureExpr.fold : PureExpr → PureExpr
+  | .add a b =>
+    match PureExpr.fold a, PureExpr.fold b with
+    | .lit m, .lit n => .lit (m + n)
+    | a', b' => .add a' b'
+  | .sub a b =>
+    match PureExpr.fold a, PureExpr.fold b with
+    | .lit m, .lit n => .lit (m - n)
+    | a', b' => .sub a' b'
+  | .mul a b =>
+    match PureExpr.fold a, PureExpr.fold b with
+    | .lit m, .lit n => .lit (m * n)
+    | a', b' => .mul a' b'
+  | e => e
+
+/-- Normal form of `nonZero e`: literals are decided and products are split, since the
+    integers have no zero divisors. -/
+private def GuardIR.mkNonZero : PureExpr → GuardIR
+  | .lit n => if n = 0 then .bot else .top
+  | .mul a b => GuardIR.mkConj (GuardIR.mkNonZero a) (GuardIR.mkNonZero b)
+  | e => .nonZero e
+
+/-- Negation with double-negation elimination (guards are Boolean-valued). -/
+private def GuardIR.mkNot : GuardIR → GuardIR
+  | .top => .bot
+  | .bot => .top
+  | .imp g .bot => g
+  | g => .imp g .bot
+
+/-- Normal form of `a = b`: syntactically equal sides and literal pairs are decided,
+    comparison with the literal `0` becomes `¬ nonZero`, and comparison with a non-zero
+    literal additionally records that the other side is non-zero. -/
+private def GuardIR.mkEq (a b : PureExpr) : GuardIR :=
+  if a = b then .top
+  else
+    match a, b with
+    | .lit _, .lit _ => .bot
+    | e, .lit n =>
+      if n = 0 then GuardIR.mkNot (GuardIR.mkNonZero e)
+      else GuardIR.mkConj (GuardIR.mkNonZero e) (.eq e (.lit n))
+    | .lit n, e =>
+      if n = 0 then GuardIR.mkNot (GuardIR.mkNonZero e)
+      else GuardIR.mkConj (GuardIR.mkNonZero e) (.eq (.lit n) e)
+    | a, b => .eq a b
+
+/-- Implication of normal forms: `g ⇨ g` is `⊤` and `g ⇨ ⊥` is built with `GuardIR.mkNot`. -/
+private def GuardIR.impN (a b : GuardIR) : GuardIR :=
+  if a = b then .top
+  else
+    match b with
+    | .bot => GuardIR.mkNot a
+    | b => GuardIR.mkImp a b
+
+/-- Arithmetic-aware normal form of a guard. -/
+private def GuardIR.norm : GuardIR → GuardIR
+  | .top => .top
+  | .bot => .bot
+  | .nonZero e => GuardIR.mkNonZero (PureExpr.fold e)
+  | .eq a b => GuardIR.mkEq (PureExpr.fold a) (PureExpr.fold b)
+  | .conj g h => GuardIR.mkConj (GuardIR.norm g) (GuardIR.norm h)
+  | .imp g h => GuardIR.impN (GuardIR.norm g) (GuardIR.norm h)
+
+/-! ### Syntactic pullback across statements -/
+
+/-- Substitution `p[v := r]`. -/
+private def PureExpr.subst (v : VarId) (r : PureExpr) : PureExpr → PureExpr
+  | .lit n => .lit n
+  | .var w => if w = v then r else .var w
+  | .add a b => .add (PureExpr.subst v r a) (PureExpr.subst v r b)
+  | .sub a b => .sub (PureExpr.subst v r a) (PureExpr.subst v r b)
+  | .mul a b => .mul (PureExpr.subst v r a) (PureExpr.subst v r b)
+
+/-- Substitution `g[v := r]` in every atom of a guard: the weakest precondition of `g`
+    across the assignment `v := r`. -/
+private def GuardIR.subst (v : VarId) (r : PureExpr) : GuardIR → GuardIR
+  | .top => .top
+  | .bot => .bot
+  | .nonZero e => .nonZero (PureExpr.subst v r e)
+  | .eq a b => .eq (PureExpr.subst v r a) (PureExpr.subst v r b)
+  | .conj g h => .conj (GuardIR.subst v r g) (GuardIR.subst v r h)
+  | .imp g h => .imp (GuardIR.subst v r g) (GuardIR.subst v r h)
+
+/-- Weakest precondition at a two-way branch on `c`, given the preconditions `gt` and `gf`
+    of the two arms: `(c → gt) ∧ (¬ c → gf)`. The arms are normalised first; if they then
+    agree the branch condition is irrelevant and no case split is recorded. -/
+private def GuardIR.branch (c gt gf : GuardIR) : GuardIR :=
+  let t := GuardIR.norm gt
+  let f := GuardIR.norm gf
+  if t = f then t
+  else
+    let c' := GuardIR.norm c
+    GuardIR.mkConj (GuardIR.impN c' t) (GuardIR.impN (GuardIR.mkNot c') f)
+
+/-- Computable syntactic weakest-precondition pullback of a `GuardIR` across an imperative `Stmt`. -/
+def pullbackGuardIR (s : Stmt) (g : GuardIR) : GuardIR :=
+  match s with
+  | .skip => g
+  | .assign v rhs => GuardIR.subst v rhs g
+  | .seq s₁ s₂ => pullbackGuardIR s₁ (pullbackGuardIR s₂ g)
+  | .ite c t f => GuardIR.branch c (pullbackGuardIR t g) (pullbackGuardIR f g)
+
+/-- Computable edge guard synthesis across an imperative `Stmt` from pre-context `a` to post-guard `b`. -/
+def synthesizeStmtGuardIR (s : Stmt) (a b : GuardIR) : GuardIR :=
+  synthesizeGuardIR (GuardIR.norm a) (GuardIR.norm (pullbackGuardIR s b))
+
+/-! ### Statement and block rewriting -/
+
+/-- `entailsAfter s a b`: every execution of `s` from a state satisfying `a` ends in a state
+    satisfying `b`. Equivalently (`GuardIR.entailsAfter_eq`), the edge guard
+    `synthesizeStmtGuardIR s a b` is `.top`. -/
+private def GuardIR.entailsAfter (s : Stmt) (a b : GuardIR) : Bool :=
+  GuardIR.entails (GuardIR.norm a) (GuardIR.norm (pullbackGuardIR s b))
+
+/-- Sequencing that drops `skip`. -/
+private def Stmt.mkSeq (s₁ s₂ : Stmt) : Stmt :=
+  match s₁, s₂ with
+  | .skip, s => s
+  | s, .skip => s
+  | s₁, s₂ => .seq s₁ s₂
+
+/-- Branching that drops the guard when both arms are the same statement. -/
+private def Stmt.mkIte (c : GuardIR) (t f : Stmt) : Stmt :=
+  if t = f then t else .ite c t f
+
+/-- `Stmt.optimize K pre s` rewrites `s`, which runs after the prefix `pre` from entry states
+    satisfying `K`. A branch is pruned when the entry context entails, across `pre`, that
+    its condition holds or fails; otherwise both arms are rewritten under the entry context
+    extended with the pulled-back path condition. -/
+private def Stmt.optimize : GuardIR → Stmt → Stmt → Stmt
+  | _, _, .skip => .skip
+  | _, _, .assign v rhs => .assign v rhs
+  | K, pre, .seq s₁ s₂ =>
+    Stmt.mkSeq (Stmt.optimize K pre s₁) (Stmt.optimize K (.seq pre s₁) s₂)
+  | K, pre, .ite c t f =>
+    if GuardIR.entailsAfter pre K c then Stmt.optimize K pre t
+    else if GuardIR.entailsAfter pre K (.imp c .bot) then Stmt.optimize K pre f
+    else
+      Stmt.mkIte c (Stmt.optimize (.conj K (pullbackGuardIR pre c)) pre t)
+        (Stmt.optimize (.conj K (pullbackGuardIR pre (.imp c .bot))) pre f)
+
+/-- The conjuncts of a guard. -/
+private def GuardIR.conjuncts : GuardIR → List GuardIR
+  | .conj g h => GuardIR.conjuncts g ++ GuardIR.conjuncts h
+  | g => [g]
+
+/-- Guards whose truth in the final state would let `optimizeExpr` simplify `e`: the
+    non-zeroness of every pure divisor and the conjuncts of every guard-branch condition. -/
+private def Expr.factCandidates : Expr → List GuardIR
+  | .pure _ => []
+  | .add a b | .sub a b | .mul a b => Expr.factCandidates a ++ Expr.factCandidates b
+  | .checkedDiv n d | .uncheckedDiv n d =>
+    (match Expr.asPure? d with
+     | some pd => [GuardIR.nonZero pd]
+     | none => []) ++ (Expr.factCandidates n ++ Expr.factCandidates d)
+  | .iteGuard g t f =>
+    GuardIR.conjuncts g ++ (Expr.factCandidates t ++ Expr.factCandidates f)
+
+/-- Conjunction of the candidates accepted by `p`. -/
+private def GuardIR.collect (p : GuardIR → Bool) : List GuardIR → GuardIR
+  | [] => .top
+  | g :: gs => if p g then .conj g (GuardIR.collect p gs) else GuardIR.collect p gs
+
+/-- Computable context-sensitive block optimizer across `BlockProg` statement prefixes and return expressions. -/
+def optimizeBlock (ctx : GuardIR) (prog : BlockProg) : BlockProg :=
+  let body := Stmt.optimize ctx .skip prog.body
+  { body := body
+    ret := optimizeExpr
+      (GuardIR.collect (GuardIR.entailsAfter body ctx) (Expr.factCandidates prog.ret)) prog.ret }
+
+/-! ### Semantics of the arithmetic-aware normaliser -/
+
+private theorem PureExpr.evalPure_fold (env : Env) (p : PureExpr) :
+    evalPure env (PureExpr.fold p) = evalPure env p := by
+  induction p with
+  | add a b iha ihb =>
+    simp only [PureExpr.fold]
+    rw [evalPure, ← iha, ← ihb]
+    generalize PureExpr.fold a = x
+    generalize PureExpr.fold b = y
+    split <;> rfl
+  | sub a b iha ihb =>
+    simp only [PureExpr.fold]
+    rw [evalPure, ← iha, ← ihb]
+    generalize PureExpr.fold a = x
+    generalize PureExpr.fold b = y
+    split <;> rfl
+  | mul a b iha ihb =>
+    simp only [PureExpr.fold]
+    rw [evalPure, ← iha, ← ihb]
+    generalize PureExpr.fold a = x
+    generalize PureExpr.fold b = y
+    split <;> rfl
+  | _ => rfl
+
+private theorem GuardIR.evalGuard_mkNonZero (env : Env) (e : PureExpr) :
+    evalGuard env (GuardIR.mkNonZero e) = decide (evalPure env e ≠ 0) := by
+  induction e with
+  | lit n =>
+    simp only [GuardIR.mkNonZero, evalPure]
+    split
+    · next h => exact (decide_eq_false (fun hne => hne h)).symm
+    · next h => exact (decide_eq_true h).symm
+  | mul a b iha ihb =>
+    simp only [GuardIR.mkNonZero, GuardIR.evalGuard_mkConj, iha, ihb, evalPure]
+    rw [← Bool.decide_and]
+    exact decide_eq_decide.mpr Int.mul_ne_zero_iff.symm
+  | _ => rfl
+
+private theorem GuardIR.evalGuard_mkNot (env : Env) (g : GuardIR) :
+    evalGuard env (GuardIR.mkNot g) = !evalGuard env g := by
+  cases g with
+  | imp g₁ g₂ => cases g₂ <;> simp [GuardIR.mkNot, evalGuard]
+  | _ => simp [GuardIR.mkNot, evalGuard]
+
+private theorem Int.not_decide_ne_zero (x : Int) : (!decide (x ≠ 0)) = decide (x = 0) :=
+  if h : x = 0 then by
+    rw [decide_eq_true h, decide_eq_false (fun hne : x ≠ 0 => hne h)]
+    rfl
+  else by
+    rw [decide_eq_false h, decide_eq_true h]
+    rfl
+
+/-- A value equal to a non-zero literal is itself non-zero. -/
+private theorem Int.decide_ne_zero_and_eq {n : Int} (hn : n ≠ 0) (x : Int) :
+    (decide (x ≠ 0) && decide (x = n)) = decide (x = n) :=
+  if h : x = n then by
+    have hx : x ≠ 0 := fun hx => hn (h ▸ hx)
+    rw [decide_eq_true h, decide_eq_true hx]
+    rfl
+  else by
+    rw [decide_eq_false h, Bool.and_false]
+
+private theorem Int.decide_ne_zero_and_eq' {n : Int} (hn : n ≠ 0) (x : Int) :
+    (decide (x ≠ 0) && decide (n = x)) = decide (n = x) :=
+  if h : n = x then by
+    have hx : x ≠ 0 := fun hx => hn (h.trans hx)
+    rw [decide_eq_true h, decide_eq_true hx]
+    rfl
+  else by
+    rw [decide_eq_false h, Bool.and_false]
+
+private theorem GuardIR.evalGuard_mkEq (env : Env) (a b : PureExpr) :
+    evalGuard env (GuardIR.mkEq a b) = decide (evalPure env a = evalPure env b) := by
+  unfold GuardIR.mkEq
+  split
+  · next h => subst h; exact (decide_eq_true rfl).symm
+  · next hab =>
+    split
+    · next m n =>
+      exact (decide_eq_false (fun h : m = n => hab (h ▸ rfl))).symm
+    · next e n =>
+      split
+      · next hn =>
+        subst hn
+        rw [GuardIR.evalGuard_mkNot, GuardIR.evalGuard_mkNonZero]
+        exact Int.not_decide_ne_zero _
+      · next hn =>
+        rw [GuardIR.evalGuard_mkConj, GuardIR.evalGuard_mkNonZero]
+        exact Int.decide_ne_zero_and_eq hn _
+    · next n e =>
+      split
+      · next hn =>
+        subst hn
+        rw [GuardIR.evalGuard_mkNot, GuardIR.evalGuard_mkNonZero]
+        exact (Int.not_decide_ne_zero _).trans (decide_eq_decide.mpr eq_comm)
+      · next hn =>
+        rw [GuardIR.evalGuard_mkConj, GuardIR.evalGuard_mkNonZero]
+        exact Int.decide_ne_zero_and_eq' hn _
+    · rfl
+
+private theorem GuardIR.evalGuard_impN (env : Env) (a b : GuardIR) :
+    evalGuard env (GuardIR.impN a b) = (!evalGuard env a || evalGuard env b) := by
+  unfold GuardIR.impN
+  split
+  · next h =>
+    subst h
+    cases evalGuard env a <;> rfl
+  · cases b <;> simp [GuardIR.evalGuard_mkNot, GuardIR.evalGuard_mkImp, evalGuard]
+
+/-- Normalisation preserves the Boolean value of a guard in every environment. -/
+private theorem GuardIR.evalGuard_norm (env : Env) (g : GuardIR) :
+    evalGuard env (GuardIR.norm g) = evalGuard env g := by
+  induction g with
+  | top => rfl
+  | bot => rfl
+  | nonZero e =>
+    rw [GuardIR.norm, GuardIR.evalGuard_mkNonZero, PureExpr.evalPure_fold]
+    rfl
+  | eq a b =>
+    rw [GuardIR.norm, GuardIR.evalGuard_mkEq, PureExpr.evalPure_fold, PureExpr.evalPure_fold]
+    rfl
+  | conj g h ihg ihh =>
+    rw [GuardIR.norm, GuardIR.evalGuard_mkConj, ihg, ihh]
+    rfl
+  | imp g h ihg ihh =>
+    rw [GuardIR.norm, GuardIR.evalGuard_impN, ihg, ihh]
+    rfl
+
+/-! ### Semantics of the pullback -/
+
+private theorem PureExpr.evalPure_subst (env : Env) (v : VarId) (r : PureExpr) (p : PureExpr) :
+    evalPure env (PureExpr.subst v r p) = evalPure (updateEnv env v (evalPure env r)) p := by
+  induction p with
+  | lit n => rfl
+  | var w =>
+    simp only [PureExpr.subst, updateEnv, evalPure]
+    split
+    · next h => rw [ite_eq_left (decide_eq_true h)]
+    · next h => rw [ite_eq_right (fun hd => h (of_decide_eq_true hd))]; rfl
+  | add a b iha ihb => simp only [PureExpr.subst, evalPure, iha, ihb]
+  | sub a b iha ihb => simp only [PureExpr.subst, evalPure, iha, ihb]
+  | mul a b iha ihb => simp only [PureExpr.subst, evalPure, iha, ihb]
+
+/-- Substitution lemma: evaluating `g[v := r]` is evaluating `g` after the assignment. -/
+private theorem GuardIR.evalGuard_subst (env : Env) (v : VarId) (r : PureExpr) (g : GuardIR) :
+    evalGuard env (GuardIR.subst v r g) = evalGuard (updateEnv env v (evalPure env r)) g := by
+  induction g with
+  | top => rfl
+  | bot => rfl
+  | nonZero e => simp only [GuardIR.subst, evalGuard, PureExpr.evalPure_subst]
+  | eq a b => simp only [GuardIR.subst, evalGuard, PureExpr.evalPure_subst]
+  | conj g h ihg ihh => simp only [GuardIR.subst, evalGuard, ihg, ihh]
+  | imp g h ihg ihh => simp only [GuardIR.subst, evalGuard, ihg, ihh]
+
+private theorem GuardIR.evalGuard_branch (env : Env) (c gt gf : GuardIR) :
+    evalGuard env (GuardIR.branch c gt gf) =
+      (if evalGuard env c = true then evalGuard env gt else evalGuard env gf) := by
+  have ht := GuardIR.evalGuard_norm env gt
+  have hf := GuardIR.evalGuard_norm env gf
+  have hc := GuardIR.evalGuard_norm env c
+  unfold GuardIR.branch
+  simp only []
+  split
+  · next h =>
+    rw [h] at ht
+    rw [← ht, ← hf, h]
+    cases evalGuard env c <;> rfl
+  · rw [GuardIR.evalGuard_mkConj, GuardIR.evalGuard_impN, GuardIR.evalGuard_impN,
+      GuardIR.evalGuard_mkNot, ht, hf, hc]
+    cases evalGuard env c <;> cases evalGuard env gt <;> cases evalGuard env gf <;> rfl
+
+/-- Pointwise Boolean semantics of the pullback: evaluate the guard after running `s`. -/
+private theorem evalGuard_pullbackGuardIR (s : Stmt) :
+    ∀ (g : GuardIR) (env : Env),
+      evalGuard env (pullbackGuardIR s g) = evalGuard (execStmt s env) g := by
+  induction s with
+  | skip => intro g env; rfl
+  | assign v rhs => intro g env; exact GuardIR.evalGuard_subst env v rhs g
+  | seq s₁ s₂ ih₁ ih₂ =>
+    intro g env
+    rw [pullbackGuardIR, ih₁, ih₂]
+    rfl
+  | ite c t f iht ihf =>
+    intro g env
+    rw [pullbackGuardIR, GuardIR.evalGuard_branch, iht, ihf]
+    simp only [execStmt]
+    cases evalGuard env c <;> rfl
+
+/-- Pointwise Boolean semantics of the edge guard: `a → b after s`. -/
+private theorem evalGuard_synthesizeStmtGuardIR (env : Env) (s : Stmt) (a b : GuardIR) :
+    evalGuard env (synthesizeStmtGuardIR s a b) =
+      (!evalGuard env a || evalGuard (execStmt s env) b) := by
+  unfold synthesizeStmtGuardIR
+  rw [evalGuard_synthesizeGuardIR, GuardIR.evalGuard_norm, GuardIR.evalGuard_norm,
+    evalGuard_pullbackGuardIR]
+
+private theorem denoteGuard_norm (g : GuardIR) : denoteGuard (GuardIR.norm g) = denoteGuard g := by
+  funext env
+  show (evalGuard env (GuardIR.norm g) = true) = (evalGuard env g = true)
+  rw [GuardIR.evalGuard_norm]
+
+/-! ### Milestone 2 target theorems: bridge, pullback and edge-guard synthesis -/
+
+/-- Pulled-Back State-Transfer Lifting Equivalence: `GuardedEquiv` along
+    `pullbackEval (stateTransfer step) (liftEval run)` at predicate `P` holds if and only if
+    `t₁` and `t₂` produce identical concrete outcomes in `step s` whenever `P s` holds. -/
+theorem pullbackEval_stateTransfer_liftEval_iff {Out : Type*}
+    (step : S₁ → S₂) (run : S₂ → Term → Out) (P : S₁ → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (pullbackEval (stateTransfer step) (liftEval run)) P t₁ t₂ ↔
+      ∀ s, P s → run (step s) t₁ = run (step s) t₂ := by
+  constructor
+  · intro h s hs
+    have hP : pullbackEval (stateTransfer step) (liftEval run) P t₁ =
+        pullbackEval (stateTransfer step) (liftEval run) P t₂ := h P (le_refl P)
+    have hEq : ((∃ s₁, step s₁ = step s ∧ P s₁) ∧ run (step s) t₁ = run (step s) t₁) =
+        ((∃ s₁, step s₁ = step s ∧ P s₁) ∧ run (step s) t₂ = run (step s) t₁) :=
+      congrFun (congrFun hP (step s)) (run (step s) t₁)
+    exact (hEq ▸ And.intro (Exists.intro s (And.intro rfl hs)) rfl).2.symm
+  · intro h stage hst
+    funext s₂ out
+    apply propext
+    show ((∃ s₁, step s₁ = s₂ ∧ stage s₁) ∧ run s₂ t₁ = out) ↔
+      ((∃ s₁, step s₁ = s₂ ∧ stage s₁) ∧ run s₂ t₂ = out)
+    constructor
+    · rintro ⟨⟨s₁, rfl, hs⟩, he⟩
+      exact ⟨⟨s₁, rfl, hs⟩, (h s₁ (hst s₁ hs)) ▸ he⟩
+    · rintro ⟨⟨s₁, rfl, hs⟩, he⟩
+      exact ⟨⟨s₁, rfl, hs⟩, (h s₁ (hst s₁ hs)).symm ▸ he⟩
+
+/-- Categorical Realization of `pullbackGuardIR`: Denotation commutes with `(stateTransfer (execStmt s)).pullback`. -/
+theorem pullbackGuardIR_denote (s : Stmt) (g : GuardIR) :
+    denoteGuard (pullbackGuardIR s g) =
+      (stateTransfer (execStmt s)).pullback (denoteGuard g) := by
+  funext env
+  show (evalGuard env (pullbackGuardIR s g) = true) = (evalGuard (execStmt s env) g = true)
+  rw [evalGuard_pullbackGuardIR]
+
+/-- Contravariant Compositionality of `pullbackGuardIR` on Sequential Statements:
+    Denotation on `.seq s₁ s₂` equals the composed `CFGTransfer` pullback. -/
+theorem pullbackGuardIR_seq (s₁ s₂ : Stmt) (g : GuardIR) :
+    denoteGuard (pullbackGuardIR (.seq s₁ s₂) g) =
+      ((stateTransfer (execStmt s₁)).comp (stateTransfer (execStmt s₂))).pullback (denoteGuard g) := by
+  rw [pullbackGuardIR_denote]
+  rfl
+
+/-- Categorical Realization of `synthesizeStmtGuardIR`: Denotation commutes with abstract `synthesizeEdgeGuard`
+    along `stateTransfer (execStmt s)`. -/
+theorem synthesizeStmtGuardIR_denote (s : Stmt) (a b : GuardIR) :
+    denoteGuard (synthesizeStmtGuardIR s a b) =
+      synthesizeEdgeGuard (stateTransfer (execStmt s)) (denoteGuard a) (denoteGuard b) := by
+  unfold synthesizeStmtGuardIR synthesizeEdgeGuard
+  rw [synthesizeGuardIR_denote, denoteGuard_norm, denoteGuard_norm, pullbackGuardIR_denote]
+
+/-- Universal Property (Kripke-Joyal / Galois Adjunction) of `synthesizeStmtGuardIR`:
+    `ForcesAfter` across `execStmt s` under `denoteGuard a ⊓ g` holds iff `g` implies the synthesized guard. -/
+theorem synthesizeStmtGuardIR_universal (s : Stmt) (a b : GuardIR) (g : Env → Prop) :
+    ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a ⊓ g) (denoteGuard b) ↔
+      g ≤ denoteGuard (synthesizeStmtGuardIR s a b) := by
+  rw [synthesizeStmtGuardIR_denote, forcesAfter_iff_pullback, forces_guard_iff]
+  exact Iff.rfl
+
+/-- Operational Diamond Join Rewrite Soundness via `synthesizeStmtGuardIR`:
+    Given a downstream rewrite `GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂`,
+    conjoining `ctx` with the conjunction of branch edge guards guarantees `e₁` and `e₂`
+    evaluate to identical `Outcome`s after both `s₁` and `s₂`. -/
+theorem synthesizeStmtGuardIR_diamond_sound (s₁ s₂ : Stmt) (ctx req : GuardIR)
+    (e₁ e₂ : Expr) (h : GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂) :
+    let g := GuardIR.conj (synthesizeStmtGuardIR s₁ ctx req) (synthesizeStmtGuardIR s₂ ctx req)
+    ∀ env : Env, evalGuard env ctx = true → evalGuard env g = true →
+      evalExpr (execStmt s₁ env) e₁ = evalExpr (execStmt s₁ env) e₂ ∧
+        evalExpr (execStmt s₂ env) e₁ = evalExpr (execStmt s₂ env) e₂ := by
+  intro g env hctx hg
+  have hreq := (liftEval_guardedEquiv_iff evalExpr (denoteGuard req) e₁ e₂).mp h
+  have hg' : (evalGuard env (synthesizeStmtGuardIR s₁ ctx req) &&
+      evalGuard env (synthesizeStmtGuardIR s₂ ctx req)) = true := hg
+  rw [evalGuard_synthesizeStmtGuardIR, evalGuard_synthesizeStmtGuardIR, hctx] at hg'
+  simp only [Bool.not_true, Bool.false_or, Bool.and_eq_true] at hg'
+  exact ⟨hreq _ hg'.1, hreq _ hg'.2⟩
+
+/-- Every target whose hypotheses are all available in the context is discharged. -/
+private theorem GuardIR.residual_eq_top_of_hasHyp (t : GuardIR) :
+    ∀ {c : GuardIR}, (∀ x, GuardIR.hasHyp t x = true → GuardIR.hasHyp c x = true) →
+      GuardIR.residual c t = .top := by
+  induction t with
+  | top => intro c _; rfl
+  | bot =>
+    intro c h
+    simp only [GuardIR.residual, h .bot rfl, ↓reduceIte]
+  | nonZero e =>
+    intro c h
+    simp only [GuardIR.residual, h (.nonZero e) (decide_eq_true rfl), ↓reduceIte]
+  | eq a b =>
+    intro c h
+    simp only [GuardIR.residual, h (.eq a b) (decide_eq_true rfl), ↓reduceIte]
+  | conj t₁ t₂ ih₁ ih₂ =>
+    intro c h
+    have h₁ : GuardIR.residual c t₁ = .top :=
+      ih₁ (fun x hx => h x (by simp only [GuardIR.hasHyp, hx, Bool.true_or]))
+    have h₂ : GuardIR.residual (.conj c t₁) t₂ = .top :=
+      ih₂ (fun x hx => by
+        simp only [GuardIR.hasHyp, h x (by simp only [GuardIR.hasHyp, hx, Bool.or_true]),
+          Bool.true_or])
+    simp only [GuardIR.residual, h₁, h₂]
+    rfl
+  | imp t₁ t₂ _ _ =>
+    intro c h
+    simp only [GuardIR.residual, h (.imp t₁ t₂) (decide_eq_true rfl), ↓reduceIte]
+
+/-- Reflexivity of the Milestone 1 entailment test. -/
+private theorem GuardIR.entails_self (g : GuardIR) : GuardIR.entails g g = true := by
+  unfold GuardIR.entails GuardIR.simplifyUnder
+  rw [GuardIR.residual_eq_top_of_hasHyp (GuardIR.nf g) (fun _ h => h)]
+  rfl
+
+/-- Reflexivity of guard synthesis: `a ⇨ a` normalises to `.top`. -/
+private theorem synthesizeGuardIR_self (g : GuardIR) : synthesizeGuardIR g g = .top :=
+  GuardIR.isTop_iff.mp ((GuardIR.entails_eq g g) ▸ GuardIR.entails_self g)
+
+/-- Non-Zero Literal Discharge: Synthesizing `.nonZero (.lit n)` across `.skip` from `.top`
+    normalizes to `.top` whenever `n ≠ 0`. -/
+theorem synthesizeStmtGuardIR_lit_nonZero (n : Int) (hn : n ≠ 0) :
+    synthesizeStmtGuardIR .skip .top (.nonZero (.lit n)) = .top := by
+  have h : GuardIR.norm (.nonZero (.lit n)) = .top := by
+    simp only [GuardIR.norm, PureExpr.fold, GuardIR.mkNonZero, ite_eq_right hn]
+  unfold synthesizeStmtGuardIR
+  rw [pullbackGuardIR, h]
+  rfl
+
+/-- Assignment Pullback Self-Discharge: Across `v := rhs`, pre-context `.nonZero rhs`
+    discharges post-requirement `.nonZero (.var v)` to `.top`. -/
+theorem synthesizeStmtGuardIR_assign_self (v : VarId) (rhs : PureExpr) :
+    synthesizeStmtGuardIR (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top := by
+  have h : pullbackGuardIR (.assign v rhs) (.nonZero (.var v)) = .nonZero rhs := by
+    simp only [pullbackGuardIR, GuardIR.subst, PureExpr.subst, ↓reduceIte]
+  unfold synthesizeStmtGuardIR
+  rw [h]
+  exact synthesizeGuardIR_self _
+
+/-- Diamond Safe-Divisor Discharge: Across `if x == 0 then d := n else d := x` with `n ≠ 0`,
+    post-requirement `.nonZero (.var d)` discharges unconditionally from `.top` to `.top`. -/
+theorem synthesizeStmtGuardIR_diamond_safe (x d : VarId) (n : Int) (hn : n ≠ 0) :
+    synthesizeStmtGuardIR
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      .top (.nonZero (.var d)) = .top := by
+  have hwp : pullbackGuardIR
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      (.nonZero (.var d)) = .top := by
+    simp only [pullbackGuardIR, GuardIR.subst, PureExpr.subst, GuardIR.branch, GuardIR.norm,
+      PureExpr.fold, GuardIR.mkNonZero, GuardIR.mkEq, GuardIR.mkNot, GuardIR.impN,
+      GuardIR.mkConj, GuardIR.mkImp, ite_eq_right hn, reduceCtorEq, ↓reduceIte]
+  unfold synthesizeStmtGuardIR
+  rw [hwp]
+  rfl
+
+/-! ### Soundness of the statement and block optimizers -/
+
+/-- The optimizer's query is exactly triviality of the synthesized edge guard. -/
+private theorem GuardIR.entailsAfter_eq (s : Stmt) (a b : GuardIR) :
+    GuardIR.entailsAfter s a b = GuardIR.isTop (synthesizeStmtGuardIR s a b) :=
+  GuardIR.entails_eq _ _
+
+/-- Soundness of the optimizer's query, obtained from the universal property (Kripke-Joyal
+    forcing) of `synthesizeStmtGuardIR`: a trivial edge guard means that every state reached
+    from the pre-context forces the post-guard. -/
+private theorem GuardIR.entailsAfter_sound {s : Stmt} {a b : GuardIR} {env : Env}
+    (h : GuardIR.entailsAfter s a b = true) (ha : evalGuard env a = true) :
+    evalGuard (execStmt s env) b = true := by
+  have htop : synthesizeStmtGuardIR s a b = .top :=
+    GuardIR.isTop_iff.mp (GuardIR.entailsAfter_eq s a b ▸ h)
+  have hforce : ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a ⊓ denoteGuard a)
+      (denoteGuard b) :=
+    (synthesizeStmtGuardIR_universal s a b (denoteGuard a)).mpr (by rw [htop]; intro _ _; rfl)
+  exact hforce (execStmt s env) (Exists.intro env (And.intro rfl (And.intro ha ha)))
+
+private theorem evalGuard_eq_false_of_imp_bot {env : Env} {c : GuardIR}
+    (h : evalGuard env (.imp c .bot) = true) : evalGuard env c = false := by
+  have h' : (!evalGuard env c || false) = true := h
+  cases hc : evalGuard env c with
+  | false => rfl
+  | true => rw [hc] at h'; exact absurd h' (by decide)
+
+private theorem evalGuard_imp_bot_of_eq_false {env : Env} {c : GuardIR}
+    (h : evalGuard env c = false) : evalGuard env (.imp c .bot) = true := by
+  show (!evalGuard env c || false) = true
+  rw [h]
+  rfl
+
+private theorem Stmt.execStmt_mkSeq (s₁ s₂ : Stmt) (env : Env) :
+    execStmt (Stmt.mkSeq s₁ s₂) env = execStmt s₂ (execStmt s₁ env) := by
+  unfold Stmt.mkSeq
+  split <;> rfl
+
+private theorem Stmt.execStmt_mkIte (c : GuardIR) (t f : Stmt) (env : Env) :
+    execStmt (Stmt.mkIte c t f) env = execStmt (.ite c t f) env := by
+  unfold Stmt.mkIte
+  split
+  · next h =>
+    subst h
+    simp only [execStmt]
+    cases evalGuard env c <;> rfl
+  · rfl
+
+/-- The rewritten statement performs the same state transition as the original from every
+    state reachable through the prefix from an entry state satisfying the context. -/
+private theorem Stmt.execStmt_optimize (s : Stmt) :
+    ∀ (K : GuardIR) (pre : Stmt) (env : Env), evalGuard env K = true →
+      execStmt (Stmt.optimize K pre s) (execStmt pre env) = execStmt s (execStmt pre env) := by
+  induction s with
+  | skip => intro K pre env _; rfl
+  | assign v rhs => intro K pre env _; rfl
+  | seq s₁ s₂ ih₁ ih₂ =>
+    intro K pre env hK
+    rw [Stmt.optimize, Stmt.execStmt_mkSeq, ih₁ K pre env hK]
+    exact ih₂ K (.seq pre s₁) env hK
+  | ite c t f iht ihf =>
+    intro K pre env hK
+    rw [Stmt.optimize]
+    split
+    · next hc =>
+      have hc' : evalGuard (execStmt pre env) c = true := GuardIR.entailsAfter_sound hc hK
+      rw [iht K pre env hK]
+      simp only [execStmt, hc', ↓reduceIte]
+    · split
+      · next hnc =>
+        have hc' : evalGuard (execStmt pre env) c = false :=
+          evalGuard_eq_false_of_imp_bot (GuardIR.entailsAfter_sound hnc hK)
+        rw [ihf K pre env hK]
+        simp only [execStmt, hc', Bool.false_eq_true, ↓reduceIte]
+      · rw [Stmt.execStmt_mkIte]
+        simp only [execStmt]
+        cases hc : evalGuard (execStmt pre env) c with
+        | true =>
+          simp only [↓reduceIte]
+          exact iht _ pre env (GuardIR.evalGuard_conj_intro hK
+            (by rw [evalGuard_pullbackGuardIR]; exact hc))
+        | false =>
+          simp only [Bool.false_eq_true, ↓reduceIte]
+          exact ihf _ pre env (GuardIR.evalGuard_conj_intro hK
+            (by rw [evalGuard_pullbackGuardIR]; exact evalGuard_imp_bot_of_eq_false hc))
+
+private theorem GuardIR.evalGuard_collect {env : Env} {p : GuardIR → Bool}
+    (hp : ∀ g, p g = true → evalGuard env g = true) (l : List GuardIR) :
+    evalGuard env (GuardIR.collect p l) = true := by
+  induction l with
+  | nil => rfl
+  | cons g gs ih =>
+    unfold GuardIR.collect
+    split
+    · next h => exact GuardIR.evalGuard_conj_intro (hp g h) ih
+    · exact ih
+
+/-- Operational soundness of `optimizeBlock`: the rewritten body reaches the same final
+    state, and every fact handed to `optimizeExpr` holds in that state. -/
+private theorem optimizeBlock_sound_aux (ctx : GuardIR) (prog : BlockProg) (env : Env)
+    (hctx : evalGuard env ctx = true) :
+    evalBlock env (optimizeBlock ctx prog) = evalBlock env prog := by
+  have hbody : execStmt (Stmt.optimize ctx .skip prog.body) env = execStmt prog.body env :=
+    Stmt.execStmt_optimize prog.body ctx .skip env hctx
+  show evalExpr (execStmt (Stmt.optimize ctx .skip prog.body) env)
+      (optimizeExpr
+        (GuardIR.collect (GuardIR.entailsAfter (Stmt.optimize ctx .skip prog.body) ctx)
+          (Expr.factCandidates prog.ret)) prog.ret) =
+    evalExpr (execStmt prog.body env) prog.ret
+  rw [optimizeExpr_sound _ _ _
+    (GuardIR.evalGuard_collect (fun g hg => GuardIR.entailsAfter_sound hg hctx) _), hbody]
+
+/-- Stage-Guarded Soundness of `optimizeBlock` via `GuardedEquiv` and `liftEval evalBlock`. -/
+theorem optimizeBlock_guardedEquiv (ctx : GuardIR) (prog : BlockProg) :
+    GuardedEquiv (liftEval evalBlock) (denoteGuard ctx) (optimizeBlock ctx prog) prog := by
+  exact (liftEval_guardedEquiv_iff evalBlock (denoteGuard ctx) (optimizeBlock ctx prog) prog).mpr
+    (fun env h => optimizeBlock_sound_aux ctx prog env h)
+
+/-- Concrete Operational Soundness of `optimizeBlock`: Whenever `evalGuard env ctx = true`,
+    `optimizeBlock ctx prog` produces the exact same `Outcome` as `prog`. -/
+theorem optimizeBlock_sound (ctx : GuardIR) (prog : BlockProg) (env : Env) :
+    evalGuard env ctx = true → evalBlock env (optimizeBlock ctx prog) = evalBlock env prog := by
+  exact optimizeBlock_sound_aux ctx prog env
+
+/-! ### Symbolic evaluation of the block optimizer on the parametric shapes -/
+
+/-- With the hypothesis `nonZero d` available, the dual-division expression is fully lowered. -/
+private theorem optimizeExpr_mkDualDivExpr_of_hasHyp {K : GuardIR} (x y d : PureExpr)
+    (h : GuardIR.hasHyp (GuardIR.nf K) (.nonZero d) = true) :
+    optimizeExpr K (mkDualDivExpr x y d) =
+      Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y) := by
+  simp only [mkDualDivExpr, optimizeExpr, Expr.postFacts, Expr.asPure?, Expr.mkBin_pure_pure,
+    Expr.mkDiv, GuardIR.entails_nonZero, GuardIR.nf, GuardIR.hasHyp_mkConj, h,
+    Expr.mkSafeDiv_pure_mul_right, Bool.true_or, ↓reduceIte]
+
+/-- With the hypothesis `nonZero d` available, `(x * d) / d` is cancelled to `x`. -/
+private theorem optimizeExpr_mkCancelExpr_of_hasHyp {K : GuardIR} (x d : PureExpr)
+    (h : GuardIR.hasHyp (GuardIR.nf K) (.nonZero d) = true) :
+    optimizeExpr K (mkCancelExpr x d) = .pure x := by
+  simp only [mkCancelExpr, optimizeExpr, Expr.postFacts, Expr.mkBin_pure_pure, Expr.mkDiv,
+    GuardIR.entails_nonZero, GuardIR.nf, GuardIR.hasHyp_mkConj, h,
+    Expr.mkSafeDiv_pure_mul_right, Bool.true_or, ↓reduceIte]
+
+/-- An accepted candidate at the head of the list is a hypothesis of the collected context. -/
+private theorem GuardIR.hasHyp_collect_head {p : GuardIR → Bool} {d : PureExpr}
+    (gs : List GuardIR) (h : p (.nonZero d) = true) :
+    GuardIR.hasHyp (GuardIR.nf (GuardIR.collect p (.nonZero d :: gs))) (.nonZero d) = true := by
+  simp only [GuardIR.collect, h, ↓reduceIte, GuardIR.nf, GuardIR.hasHyp_mkConj, GuardIR.hasHyp,
+    decide_true, Bool.true_or]
+
+private theorem Expr.divOpCount_mkSafeDiv_pure_le (pn pd : PureExpr) :
+    divOpCount (Expr.mkSafeDiv (.pure pn) pd) ≤ 1 := by
+  simp only [Expr.mkSafeDiv]
+  split
+  · exact Nat.zero_le 1
+  · exact Nat.le_refl 1
+
+/-- If the rewritten body establishes `nonZero d`, the dual-division return expression loses
+    both checks and one division. -/
+private theorem optimizeBlock_dualDiv_ret {ctx : GuardIR} {body : Stmt} (x y d : PureExpr)
+    (h : GuardIR.entailsAfter (Stmt.optimize ctx .skip body) ctx (.nonZero d) = true) :
+    checkedDivCount (optimizeBlock ctx { body := body, ret := mkDualDivExpr x y d }).ret = 0 ∧
+      divOpCount (optimizeBlock ctx { body := body, ret := mkDualDivExpr x y d }).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock ctx { body := body, ret := mkDualDivExpr x y d }).ret = 0 ∧
+      ∀ env, execCheckCost env
+        (optimizeBlock ctx { body := body, ret := mkDualDivExpr x y d }).ret = 0 := by
+  have hret : (optimizeBlock ctx { body := body, ret := mkDualDivExpr x y d }).ret =
+      Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y) :=
+    optimizeExpr_mkDualDivExpr_of_hasHyp x y d (GuardIR.hasHyp_collect_head _ h)
+  have hc : checkedDivCount (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y)) = 0 := by
+    rw [Expr.count_mkBin (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := checkedDivCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+  have hg : guardBranchCount (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y)) = 0 := by
+    rw [Expr.count_mkBin (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl),
+      Expr.count_mkSafeDiv (cnt := guardBranchCount) (fun _ => rfl) (fun _ _ => rfl)]
+    rfl
+  have hd : divOpCount (Expr.mkBin .add .add (Expr.mkSafeDiv (.pure x) d) (.pure y)) ≤ 1 := by
+    rw [Expr.count_mkBin (cnt := divOpCount) (fun _ => rfl) (fun _ _ => rfl)]
+    exact Expr.divOpCount_mkSafeDiv_pure_le x d
+  rw [hret]
+  exact ⟨hc, hd, hg, fun _ => execCheckCost_eq_zero hc hg⟩
+
+/-- Parametric Non-Zero Literal Divisor Elimination: On `{ body := .skip, ret := mkDualDivExpr num y (.lit n) }`
+    with `n ≠ 0` under `.top`, `optimizeBlock` eliminates all checked divisions, cancels the algebraic
+    factor, introduces zero guard branches, and reduces block runtime check cost to `0`. -/
+theorem optimizeBlock_literal_div_elim_param (num y : PureExpr) (n : Int) (hn : n ≠ 0) (env : Env) :
+    let prog : BlockProg := { body := .skip, ret := mkDualDivExpr num y (.lit n) }
+    checkedDivCount (optimizeBlock .top prog).ret = 0 ∧
+      divOpCount (optimizeBlock .top prog).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock .top prog).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock .top prog) = 0 := by
+  intro prog
+  have hfact : GuardIR.entailsAfter (Stmt.optimize .top .skip .skip) .top
+      (.nonZero (.lit n)) = true := by
+    show GuardIR.entailsAfter .skip .top (.nonZero (.lit n)) = true
+    rw [GuardIR.entailsAfter_eq, synthesizeStmtGuardIR_lit_nonZero n hn]
+    rfl
+  obtain ⟨hc, hd, hg, hcost⟩ := optimizeBlock_dualDiv_ret num y (.lit n) hfact
+  exact ⟨hc, hd, hg, (Nat.zero_add _).trans (hcost _)⟩
+
+/-- Parametric Sequential Aliasing & Clobber Elimination: Under `.nonZero (.var x)` with `d ≠ x`,
+    across `d := x; x := 0`, `optimizeBlock` preserves `d ≠ 0` despite clobbering `x` and eliminates
+    all checked divisions on divisor `d` with zero runtime check cost. -/
+theorem optimizeBlock_seq_clobber_elim_param (x d : VarId) (hxd : d ≠ x)
+    (num y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+      divOpCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)) = 0 := by
+  have hfact : GuardIR.entailsAfter
+      (Stmt.optimize (.nonZero (.var x)) .skip (.seq (.assign d (.var x)) (.assign x (.lit 0))))
+      (.nonZero (.var x)) (.nonZero (.var d)) = true := by
+    have hwp : pullbackGuardIR (.assign x (.lit 0)) (.nonZero (.var d)) = .nonZero (.var d) := by
+      simp only [pullbackGuardIR, GuardIR.subst, PureExpr.subst, ite_eq_right hxd]
+    show GuardIR.entailsAfter (.assign d (.var x)) (.nonZero (.var x))
+      (pullbackGuardIR (.assign x (.lit 0)) (.nonZero (.var d))) = true
+    rw [hwp, GuardIR.entailsAfter_eq, synthesizeStmtGuardIR_assign_self]
+    rfl
+  obtain ⟨hc, hd, hg, hcost⟩ := optimizeBlock_dualDiv_ret num y (.var d) hfact
+  exact ⟨hc, hd, hg, (Nat.zero_add _).trans (hcost _)⟩
+
+/-- Parametric Clobbered Divisor Trap Preservation: Under `.nonZero (.var x)`, across `d := x; x := 0`,
+    dividing by the clobbered variable `x` must still safely return `.trap` (never `.ub`). -/
+theorem optimizeBlock_clobber_trap_param (x d : VarId) (num y : PureExpr)
+    (env : Env) (hx : evalGuard env (.nonZero (.var x)) = true) :
+    evalBlock env (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y x)) = .trap := by
+  rw [optimizeBlock_sound _ _ env hx]
+  apply evalExpr_mkDualDivExpr_trap
+  show updateEnv (updateEnv env d (evalPure env (.var x))) x 0 x = 0
+  simp only [updateEnv, decide_true, ↓reduceIte]
+
+/-- Parametric Diamond CFG Safe-Divisor Elimination: Under `.top` with `n ≠ 0`, across
+    `if x == 0 then d := n else d := x`, `optimizeBlock` proves `d ≠ 0` at the diamond join,
+    eliminates all terminal checked divisions and guard branches, and reduces total block
+    runtime check cost from `3` to `≤ 1`. -/
+theorem optimizeBlock_diamond_elim_param (x d : VarId) (n : Int) (hn : n ≠ 0)
+    (num y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      divOpCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock .top (mkDiamondSafeBlock x d n num y)) ≤ 1 ∧
+      execBlockCheckCost env (mkDiamondSafeBlock x d n num y) = 3 := by
+  have hbody : Stmt.optimize .top .skip
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) =
+      .ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)) := by
+    simp only [Stmt.optimize, Stmt.mkIte, GuardIR.entailsAfter, pullbackGuardIR, GuardIR.norm,
+      PureExpr.fold, GuardIR.mkEq, GuardIR.mkNonZero, GuardIR.mkNot, GuardIR.impN,
+      GuardIR.entails, GuardIR.simplifyUnder, GuardIR.nf, GuardIR.mkImp, GuardIR.residual,
+      GuardIR.hasHyp, GuardIR.isTop, Stmt.assign.injEq, reduceCtorEq, decide_false,
+      Bool.false_or, Bool.false_eq_true, and_false, ↓reduceIte]
+  have hfact : GuardIR.entailsAfter
+      (Stmt.optimize .top .skip
+        (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))))
+      .top (.nonZero (.var d)) = true := by
+    rw [hbody, GuardIR.entailsAfter_eq, synthesizeStmtGuardIR_diamond_safe x d n hn]
+    rfl
+  have hguard : ∀ env' : Env, stmtGuardCost env'
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) = 1 := by
+    intro env'
+    simp only [stmtGuardCost, guardEvalCost]
+    cases evalGuard env' (.eq (.var x) (.lit 0)) <;> rfl
+  obtain ⟨hc, hd, hg, hcost⟩ := optimizeBlock_dualDiv_ret num y (.var d) hfact
+  refine ⟨hc, hd, hg, ?_, ?_⟩
+  · have hopt : execBlockCheckCost env (optimizeBlock .top (mkDiamondSafeBlock x d n num y)) =
+        1 + 0 := by
+      show stmtGuardCost env (Stmt.optimize .top .skip
+          (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))) +
+        execCheckCost _ (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret = 1 + 0
+      rw [hbody, hguard]
+      exact congrArg (1 + ·) (hcost _)
+    exact Nat.le_of_eq hopt
+  · have hpost : evalPure
+        (execStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env)
+        (.var d) ≠ 0 := by
+      show execStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+        env d ≠ 0
+      cases h0 : evalGuard env (.eq (.var x) (.lit 0)) with
+      | true =>
+        have hexec : execStmt
+            (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env =
+            updateEnv env d n := by
+          simp only [execStmt, h0, ↓reduceIte, evalPure]
+        rw [hexec]
+        simp only [updateEnv, decide_true, ↓reduceIte]
+        exact hn
+      | false =>
+        have hexec : execStmt
+            (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env =
+            updateEnv env d (env x) := by
+          simp only [execStmt, h0, Bool.false_eq_true, ↓reduceIte, evalPure]
+        rw [hexec]
+        simp only [updateEnv, decide_true, ↓reduceIte]
+        exact of_decide_eq_false h0
+    show stmtGuardCost env
+        (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) +
+      execCheckCost
+        (execStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env)
+        (mkDualDivExpr num y (.var d)) = 3
+    rw [hguard, execCheckCost_mkDualDivExpr num y hpost]
+
+/-- Parametric Dead-Branch Pruning & Guarded Cancellation: Under `.nonZero p` with `n ≠ 0`,
+    `optimizeBlock` prunes the unreachable zero-assignment branch in `mkDeadBranchBlock p d n y`,
+    propagates `d ≠ 0`, cancels `(y * d) / d`, and achieves `0` total block check cost. -/
+theorem optimizeBlock_dead_branch_elim_param (p : PureExpr) (d : VarId)
+    (n : Int) (hn : n ≠ 0) (y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+      divOpCount (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)) = 0 := by
+  have hbody : Stmt.optimize (.nonZero p) .skip
+      (.ite (.nonZero p) (.assign d (.lit n)) (.assign d (.lit 0))) = .assign d (.lit n) := by
+    have h : GuardIR.entailsAfter .skip (.nonZero p) (.nonZero p) = true :=
+      GuardIR.entails_self _
+    simp only [Stmt.optimize, h, ↓reduceIte]
+  have hfact : GuardIR.entailsAfter (.assign d (.lit n)) (.nonZero p)
+      (.nonZero (.var d)) = true := by
+    have hwp : GuardIR.norm (pullbackGuardIR (.assign d (.lit n)) (.nonZero (.var d))) = .top := by
+      simp only [pullbackGuardIR, GuardIR.subst, PureExpr.subst, GuardIR.norm, PureExpr.fold,
+        GuardIR.mkNonZero, ite_eq_right hn, ↓reduceIte]
+    unfold GuardIR.entailsAfter
+    rw [hwp]
+    rfl
+  have hret : (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = .pure y := by
+    show optimizeExpr
+        (GuardIR.collect
+          (GuardIR.entailsAfter
+            (Stmt.optimize (.nonZero p) .skip
+              (.ite (.nonZero p) (.assign d (.lit n)) (.assign d (.lit 0))))
+            (.nonZero p))
+          (Expr.factCandidates (mkCancelExpr y (.var d))))
+        (mkCancelExpr y (.var d)) = .pure y
+    rw [hbody]
+    exact optimizeExpr_mkCancelExpr_of_hasHyp y (.var d) (GuardIR.hasHyp_collect_head _ hfact)
+  have hb : (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).body =
+      .assign d (.lit n) := hbody
+  refine ⟨by rw [hret]; rfl, by rw [hret]; rfl, ?_⟩
+  show stmtGuardCost env (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).body +
+    execCheckCost (execStmt (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).body env)
+      (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0
+  rw [hb, hret]
+  rfl
+
 end CatSem

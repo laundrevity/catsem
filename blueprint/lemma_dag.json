@@ -530,6 +530,192 @@
         "optimizeExpr_sound"
       ],
       "informal_claim": "For arbitrary PureExpr operands x, y, d and environment env with evalPure env d = 0, evalExpr env (optimizeExpr .top (mkDualDivExpr x y d)) = .trap."
+    },
+    {
+      "id": "pullbackGuardIR",
+      "status": "spec_locked",
+      "informal_claim": "Computable syntactic weakest-precondition pullback of a GuardIR predicate across an imperative Stmt."
+    },
+    {
+      "id": "synthesizeStmtGuardIR",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullbackGuardIR",
+        "synthesizeGuardIR"
+      ],
+      "informal_claim": "Computable edge guard synthesis across an imperative Stmt from pre-context a to post-requirement b."
+    },
+    {
+      "id": "optimizeBlock",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullbackGuardIR",
+        "synthesizeStmtGuardIR",
+        "synthesizeGuardIR",
+        "optimizeExpr"
+      ],
+      "informal_claim": "Computable context-sensitive block optimizer across BlockProg statement prefixes and terminal return expressions."
+    },
+    {
+      "id": "pullbackEval_stateTransfer_liftEval_iff",
+      "status": "spec_locked",
+      "depends_on": [
+        "liftEval_guardedEquiv_iff",
+        "stateTransfer_pullback_apply"
+      ],
+      "informal_claim": "GuardedEquiv (pullbackEval (stateTransfer step) (liftEval run)) P t1 t2 iff forall s, P s -> run (step s) t1 = run (step s) t2."
+    },
+    {
+      "id": "pullbackGuardIR_denote",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullbackGuardIR",
+        "stateTransfer_pullback_apply",
+        "pullback_map_inf"
+      ],
+      "informal_claim": "denoteGuard (pullbackGuardIR s g) = (stateTransfer (execStmt s)).pullback (denoteGuard g)."
+    },
+    {
+      "id": "pullbackGuardIR_seq",
+      "status": "spec_locked",
+      "depends_on": [
+        "pullbackGuardIR_denote"
+      ],
+      "informal_claim": "denoteGuard (pullbackGuardIR (.seq s1 s2) g) = ((stateTransfer (execStmt s1)).comp (stateTransfer (execStmt s2))).pullback (denoteGuard g)."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_denote",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR",
+        "pullbackGuardIR_denote",
+        "synthesizeGuardIR_denote",
+        "synthesizeEdgeGuard_comp",
+        "synthesizeEdgeGuard_map_inf",
+        "stateTransfer_synthesizeEdgeGuard_apply"
+      ],
+      "informal_claim": "denoteGuard (synthesizeStmtGuardIR s a b) = synthesizeEdgeGuard (stateTransfer (execStmt s)) (denoteGuard a) (denoteGuard b)."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_universal",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR_denote",
+        "synthesizeEdgeGuard_sound",
+        "synthesizeEdgeGuard_weakest",
+        "forcesAfter_iff_pullback"
+      ],
+      "informal_claim": "ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a meet g) (denoteGuard b) iff g <= denoteGuard (synthesizeStmtGuardIR s a b)."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_diamond_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR_denote",
+        "guardedEquiv_diamond",
+        "guardedEquiv_edge_synthesize",
+        "pullbackEval_stateTransfer_liftEval_iff"
+      ],
+      "informal_claim": "Given GuardedEquiv (liftEval evalExpr) (denoteGuard req) e1 e2, conjoining ctx with GuardIR.conj (synthesizeStmtGuardIR s1 ctx req) (synthesizeStmtGuardIR s2 ctx req) guarantees identical outcomes after both s1 and s2."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_lit_nonZero",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR",
+        "synthesizeGuardIR_top_right"
+      ],
+      "informal_claim": "For any integer n != 0, synthesizeStmtGuardIR .skip .top (.nonZero (.lit n)) = .top."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_assign_self",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR",
+        "synthesizeGuardIR_discharge_self"
+      ],
+      "informal_claim": "For any variable v and PureExpr rhs, synthesizeStmtGuardIR (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top."
+    },
+    {
+      "id": "synthesizeStmtGuardIR_diamond_safe",
+      "status": "spec_locked",
+      "depends_on": [
+        "synthesizeStmtGuardIR",
+        "synthesizeStmtGuardIR_lit_nonZero",
+        "synthesizeStmtGuardIR_assign_self"
+      ],
+      "informal_claim": "For any variables x, d and integer n != 0, synthesizeStmtGuardIR (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) .top (.nonZero (.var d)) = .top."
+    },
+    {
+      "id": "optimizeBlock_guardedEquiv",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock",
+        "optimizeExpr_guardedEquiv",
+        "guardedEquiv_pullback",
+        "pullbackEval_stateTransfer_liftEval_iff",
+        "synthesizeStmtGuardIR_universal",
+        "synthesizeStmtGuardIR_diamond_sound"
+      ],
+      "informal_claim": "GuardedEquiv (liftEval evalBlock) (denoteGuard ctx) (optimizeBlock ctx prog) prog."
+    },
+    {
+      "id": "optimizeBlock_sound",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock_guardedEquiv",
+        "liftEval_guardedEquiv_iff"
+      ],
+      "informal_claim": "If evalGuard env ctx = true, then evalBlock env (optimizeBlock ctx prog) = evalBlock env prog."
+    },
+    {
+      "id": "optimizeBlock_literal_div_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock",
+        "synthesizeStmtGuardIR_lit_nonZero",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "For arbitrary num, y, n != 0, and env, optimizeBlock .top on { body := .skip, ret := mkDualDivExpr num y (.lit n) } achieves checkedDivCount = 0, divOpCount <= 1, guardBranchCount = 0, and execBlockCheckCost = 0."
+    },
+    {
+      "id": "optimizeBlock_seq_clobber_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock",
+        "pullbackGuardIR_seq",
+        "synthesizeStmtGuardIR_assign_self",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "For d != x and arbitrary num, y, env, optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d) achieves checkedDivCount = 0, divOpCount <= 1, guardBranchCount = 0, and execBlockCheckCost = 0."
+    },
+    {
+      "id": "optimizeBlock_clobber_trap_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock_sound"
+      ],
+      "informal_claim": "When evalGuard env (.nonZero (.var x)) = true, evalBlock env (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y x)) = .trap."
+    },
+    {
+      "id": "optimizeBlock_diamond_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock",
+        "synthesizeStmtGuardIR_diamond_safe",
+        "optimizeExpr_known_ctx_elim_param"
+      ],
+      "informal_claim": "For n != 0 and arbitrary x, d, num, y, env, optimizeBlock .top (mkDiamondSafeBlock x d n num y) eliminates checked divisions and guard branches and reduces execBlockCheckCost from 3 to at most 1."
+    },
+    {
+      "id": "optimizeBlock_dead_branch_elim_param",
+      "status": "spec_locked",
+      "depends_on": [
+        "optimizeBlock",
+        "synthesizeGuardIR_discharge_self",
+        "optimizeExpr_cancel_div_param"
+      ],
+      "informal_claim": "For n != 0 and arbitrary p, d, y, env, optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y) prunes the dead branch, cancels division completely (divOpCount = 0), and achieves execBlockCheckCost = 0."
     }
   ]
 }

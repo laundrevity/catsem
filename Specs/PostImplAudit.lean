@@ -362,3 +362,400 @@ end CatSem.PostImplAudit
 #print axioms CatSem.PostImplAudit.concrete_semantic_sweep
 
 
+/-!
+Milestone 2 Gate 2 implementation audit for submission
+a113c8855634580c0a4d8fb84ed50d15b77e757ca99156ac1af66313dffe5be8.
+The preceding Milestone 1 tests are retained unchanged.
+These tests compute with the public compiler functions and independent evaluator.
+-/
+namespace CatSem.PostImplAudit.M2
+
+/-- Save x in two fresh variables, clobber both sources, then reassign from the saved copy. -/
+def aliasSteps : Stmt :=
+  .seq (.assign 7 (.var 1))
+    (.seq (.assign 9 (.var 7))
+      (.seq (.assign 1 (.lit 0))
+        (.seq (.assign 7 (.lit 0))
+          (.assign 0 (.mul (.var 9) (.lit (-1)))))))
+def aliasBlock : BlockProg :=
+  { body := aliasSteps, ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0) }
+def xnz : GuardIR := .nonZero (.var 1)
+
+/-- The second assignment kills a saved fact despite a true entry context. -/
+def clobberSteps : Stmt :=
+  .seq (.assign 7 (.var 1))
+    (.seq (.assign 1 (.lit 0))
+      (.seq (.assign 7 (.var 1)) (.assign 0 (.var 7))))
+def clobberBlock : BlockProg :=
+  {body := clobberSteps, ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0)}
+
+/-- Distinct arms establish the same nonzero postcondition by different arithmetic. -/
+def asymmetricSteps : Stmt :=
+  .ite (.eq (.var 1) (.lit 0))
+    (.seq (.assign 7 (.lit (-2))) (.assign 0 (.mul (.var 7) (.lit 3))))
+    (.seq (.assign 9 (.var 1)) (.assign 0 (.mul (.var 9) (.lit (-1)))))
+def asymmetricBlock : BlockProg :=
+  {body := asymmetricSteps, ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0)}
+
+/-- Only one arm establishes nonzeroness: facts must not escape that arm. -/
+def partialDiamond : BlockProg :=
+  {body := .ite (.nonZero (.var 1)) (.assign 0 (.lit (-2))) (.assign 0 (.lit 0)),
+   ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0)}
+
+/-- A branch initially testing x != 0 writes x := 0 before testing x again. -/
+def changedPathSteps : Stmt :=
+  .ite (.nonZero (.var 1))
+    (.seq (.assign 1 (.lit 0))
+      (.ite (.nonZero (.var 1)) (.assign 0 (.lit 0)) (.assign 0 (.lit (-3)))))
+    (.seq (.assign 1 (.lit 2))
+      (.ite (.eq (.var 1) (.lit 0)) (.assign 0 (.lit 0)) (.assign 0 (.lit 4))))
+def changedPathBlock : BlockProg :=
+  {body := changedPathSteps, ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0)}
+
+/-- Inner conditions are entailed by the outer path, without a constant assignment. -/
+def correlatedSteps : Stmt :=
+  .ite (.nonZero (.var 1))
+    (.ite (.nonZero (.var 1)) (.assign 0 (.var 1)) (.assign 0 (.lit 0)))
+    (.ite (.nonZero (.var 1)) (.assign 0 (.lit 0)) (.assign 0 (.lit (-2))))
+def correlatedBlock : BlockProg :=
+  {body := correlatedSteps, ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 0)}
+
+/-- A branch pruned under a true context mutates the variable in that context. -/
+def mutatingDeadBlock : BlockProg :=
+  {body := .ite xnz
+      (.seq (.assign 1 (.lit 0)) (.assign 0 (.lit (-3))))
+      (.assign 0 (.lit 0)),
+   ret := mkCancelExpr (.add (.var 1) (.lit (-7))) (.var 0)}
+
+/-- The context proves a false branch, including after a prefix changes the state. -/
+def falseBranchBlock : BlockProg :=
+  {body := .seq (.assign 1 (.lit 0))
+      (.ite xnz (.assign 0 (.lit 0)) (.assign 0 (.lit (-2)))),
+   ret := mkCancelExpr (.lit (-7)) (.var 0)}
+
+/-- Source and destination coincide; guards and RHSs must still read the old state. -/
+def selfAliasBlock : BlockProg :=
+  {body := .ite (.eq (.var 1) (.lit 0))
+      (.assign 1 (.lit (-2))) (.assign 1 (.mul (.var 1) (.lit (-1)))),
+   ret := mkDualDivExpr (.lit (-7)) (.lit 5) (.var 1)}
+
+/-- Candidates include non-pure AST encodings of pure divisors and return guard atoms. -/
+def returnGuardBlock : BlockProg :=
+  {body := .seq (.assign 7 (.lit (-3))) (.assign 9 (.lit (-2))),
+   ret := .iteGuard (.eq (.var 7) (.lit (-3)))
+     (.sub (.checkedDiv (lit (-7)) (.add (v 9) (lit (-1))))
+       (mkCancelExpr (.lit 4) (.add (.var 9) (.lit (-1)))))
+     trapExpr}
+
+/-- Nonzero atomic inference is deliberately conservative for variable arithmetic. -/
+def conservativeBlock : BlockProg :=
+  {body := .assign 0 (.add (.sub (.var 1) (.var 1)) (.lit 1)),
+   ret := .checkedDiv (lit (-7)) (v 0)}
+
+/-- Existing UB and failure order remain observable after a statement clobber. -/
+def failureBlock (ret : Expr) : BlockProg :=
+  {body := clobberSteps, ret := ret}
+
+theorem self_assignment_is_simultaneous :
+    pullbackGuardIR (.assign 1 (.add (.var 1) (.lit 1))) (.eq (.var 1) (.lit 0)) =
+      .eq (.add (.var 1) (.lit 1)) (.lit 0) ∧
+    evalGuard (env 4 (-1) 0 0)
+      (pullbackGuardIR (.assign 1 (.add (.var 1) (.lit 1))) (.eq (.var 1) (.lit 0))) = true ∧
+    evalGuard (env 4 0 0 0)
+      (pullbackGuardIR (.assign 1 (.add (.var 1) (.lit 1))) (.eq (.var 1) (.lit 0))) = false := by
+  decide
+
+theorem multistep_aliasing_and_signed_reassignment :
+    evalGuard (env 4 3 0 0) xnz = true ∧
+    execStmt aliasSteps (env 4 3 0 0) 1 = 0 ∧
+    execStmt aliasSteps (env 4 3 0 0) 7 = 0 ∧
+    execStmt aliasSteps (env 4 3 0 0) 9 = 3 ∧
+    execStmt aliasSteps (env 4 3 0 0) 0 = -3 ∧
+    pullbackGuardIR aliasSteps nz = .nonZero (.mul (.var 1) (.lit (-1))) ∧
+    synthesizeStmtGuardIR aliasSteps xnz nz = .top ∧
+    evalBlock (env 4 3 0 0) aliasBlock = .val 8 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock xnz aliasBlock) = .val 8 ∧
+    evalBlock (env 4 (-3) 0 0) aliasBlock = .val 2 ∧
+    evalBlock (env 4 (-3) 0 0) (optimizeBlock xnz aliasBlock) = .val 2 ∧
+    checkedDivCount (optimizeBlock xnz aliasBlock).ret = 0 ∧
+    divOpCount (optimizeBlock xnz aliasBlock).ret = 1 ∧
+    execBlockCheckCost (env 4 3 0 0) aliasBlock = 2 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock xnz aliasBlock) = 0 := by
+  decide
+
+theorem clobbered_fact_is_rejected :
+    evalGuard (env 4 3 0 0) (.conj xnz nz) = true ∧
+    execStmt clobberSteps (env 4 3 0 0) 0 = 0 ∧
+    evalGuard (env 4 3 0 0)
+      (synthesizeStmtGuardIR clobberSteps (.conj xnz nz) nz) = false ∧
+    evalBlock (env 4 3 0 0) clobberBlock = .trap ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock (.conj xnz nz) clobberBlock) = .trap ∧
+    checkedDivCount (optimizeBlock (.conj xnz nz) clobberBlock).ret = 1 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock (.conj xnz nz) clobberBlock) = 1 := by
+  decide
+
+theorem residual_guard_truth_table :
+    evalGuard (env 4 0 0 0)
+      (synthesizeStmtGuardIR (.assign 0 (.var 1)) (.nonZero (.var 2)) nz) = true ∧
+    evalGuard (env 4 0 2 0)
+      (synthesizeStmtGuardIR (.assign 0 (.var 1)) (.nonZero (.var 2)) nz) = false ∧
+    evalGuard (env 4 (-3) 2 0)
+      (synthesizeStmtGuardIR (.assign 0 (.var 1)) (.nonZero (.var 2)) nz) = true := by
+  decide
+
+theorem arithmetic_guard_normalization :
+    synthesizeStmtGuardIR .skip .top (.nonZero (.sub (.lit (-2)) (.lit 1))) = .top ∧
+    synthesizeStmtGuardIR .skip (.eq (.lit (-3)) (.var 1)) xnz = .top ∧
+    synthesizeStmtGuardIR .skip (.eq (.var 1) (.lit (-3))) xnz = .top ∧
+    synthesizeStmtGuardIR .skip (.nonZero (.mul (.var 1) (.var 2))) xnz = .top ∧
+    synthesizeStmtGuardIR .skip (.conj xnz (.nonZero (.var 2)))
+      (.nonZero (.mul (.var 1) (.var 2))) = .top := by
+  decide
+
+theorem asymmetric_diamond_join :
+    synthesizeStmtGuardIR asymmetricSteps .top nz = .top ∧
+    evalBlock (env 4 0 0 0) asymmetricBlock = .val 7 ∧
+    evalBlock (env 4 0 0 0) (optimizeBlock .top asymmetricBlock) = .val 7 ∧
+    evalBlock (env 4 3 0 0) asymmetricBlock = .val 8 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top asymmetricBlock) = .val 8 ∧
+    evalBlock (env 4 (-3) 0 0) asymmetricBlock = .val 2 ∧
+    evalBlock (env 4 (-3) 0 0) (optimizeBlock .top asymmetricBlock) = .val 2 ∧
+    checkedDivCount (optimizeBlock .top asymmetricBlock).ret = 0 ∧
+    divOpCount (optimizeBlock .top asymmetricBlock).ret = 1 ∧
+    guardBranchCount (optimizeBlock .top asymmetricBlock).ret = 0 ∧
+    execBlockCheckCost (env 4 0 0 0) asymmetricBlock = 3 ∧
+    execBlockCheckCost (env 4 0 0 0) (optimizeBlock .top asymmetricBlock) = 1 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top asymmetricBlock) = 1 := by
+  decide
+
+theorem partial_diamond_preserves_trapping_arm :
+    evalGuard (env 4 0 0 0) (synthesizeStmtGuardIR partialDiamond.body .top nz) = false ∧
+    evalGuard (env 4 3 0 0) (synthesizeStmtGuardIR partialDiamond.body .top nz) = true ∧
+    evalBlock (env 4 0 0 0) partialDiamond = .trap ∧
+    evalBlock (env 4 0 0 0) (optimizeBlock .top partialDiamond) = .trap ∧
+    evalBlock (env 4 3 0 0) partialDiamond = .val 9 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top partialDiamond) = .val 9 ∧
+    checkedDivCount (optimizeBlock .top partialDiamond).ret = 1 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top partialDiamond) = 2 ∧
+    evalGuard (env 4 3 0 0) xnz = true ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock xnz partialDiamond) = .val 9 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock xnz partialDiamond) = 0 := by
+  decide
+
+theorem nested_condition_uses_reassigned_state :
+    (optimizeBlock .top changedPathBlock).body =
+      .ite xnz
+        (.seq (.assign 1 (.lit 0)) (.assign 0 (.lit (-3))))
+        (.seq (.assign 1 (.lit 2)) (.assign 0 (.lit 4))) ∧
+    synthesizeStmtGuardIR changedPathSteps .top nz = .top ∧
+    evalBlock (env 4 3 0 0) changedPathBlock = .val 8 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top changedPathBlock) = .val 8 ∧
+    evalBlock (env 4 0 0 0) changedPathBlock = .val 3 ∧
+    evalBlock (env 4 0 0 0) (optimizeBlock .top changedPathBlock) = .val 3 ∧
+    execBlockCheckCost (env 4 3 0 0) changedPathBlock = 4 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top changedPathBlock) = 1 ∧
+    execBlockCheckCost (env 4 0 0 0) (optimizeBlock .top changedPathBlock) = 1 := by
+  decide
+
+theorem correlated_paths_prune_nested_dead_arms :
+    (optimizeBlock .top correlatedBlock).body =
+      .ite xnz (.assign 0 (.var 1)) (.assign 0 (.lit (-2))) ∧
+    synthesizeStmtGuardIR correlatedSteps .top nz = .top ∧
+    evalBlock (env 4 3 0 0) correlatedBlock = .val 2 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top correlatedBlock) = .val 2 ∧
+    evalBlock (env 4 0 0 0) correlatedBlock = .val 9 ∧
+    evalBlock (env 4 0 0 0) (optimizeBlock .top correlatedBlock) = .val 9 ∧
+    execBlockCheckCost (env 4 3 0 0) correlatedBlock = 4 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top correlatedBlock) = 1 := by
+  decide
+
+theorem dead_branch_context_can_be_killed :
+    evalGuard (env 4 3 0 0) xnz = true ∧
+    evalGuard (execStmt mutatingDeadBlock.body (env 4 3 0 0)) xnz = false ∧
+    (optimizeBlock xnz mutatingDeadBlock).body =
+      .seq (.assign 1 (.lit 0)) (.assign 0 (.lit (-3))) ∧
+    (optimizeBlock xnz mutatingDeadBlock).ret = .pure (.add (.var 1) (.lit (-7))) ∧
+    evalBlock (env 4 3 0 0) mutatingDeadBlock = .val (-7) ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock xnz mutatingDeadBlock) = .val (-7) ∧
+    execBlockCheckCost (env 4 3 0 0) mutatingDeadBlock = 2 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock xnz mutatingDeadBlock) = 0 := by
+  decide
+
+theorem prefix_proves_false_branch :
+    (optimizeBlock .top falseBranchBlock).body =
+      .seq (.assign 1 (.lit 0)) (.assign 0 (.lit (-2))) ∧
+    evalBlock (env 4 3 0 0) falseBranchBlock = .val (-7) ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top falseBranchBlock) = .val (-7) ∧
+    divOpCount (optimizeBlock .top falseBranchBlock).ret = 0 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top falseBranchBlock) = 0 := by
+  decide
+
+theorem diamond_source_destination_alias :
+    evalBlock (env 4 0 0 0) selfAliasBlock = .val 9 ∧
+    evalBlock (env 4 0 0 0) (optimizeBlock .top selfAliasBlock) = .val 9 ∧
+    evalBlock (env 4 3 0 0) selfAliasBlock = .val 8 ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top selfAliasBlock) = .val 8 ∧
+    checkedDivCount (optimizeBlock .top selfAliasBlock).ret = 0 ∧
+    execBlockCheckCost (env 4 0 0 0) (optimizeBlock .top selfAliasBlock) = 1 := by
+  decide
+
+theorem terminal_guard_and_compound_divisor :
+    evalBlock (env 4 3 0 0) returnGuardBlock = .val (-1) ∧
+    evalBlock (env 4 3 0 0) (optimizeBlock .top returnGuardBlock) = .val (-1) ∧
+    checkedDivCount (optimizeBlock .top returnGuardBlock).ret = 0 ∧
+    guardBranchCount (optimizeBlock .top returnGuardBlock).ret = 0 ∧
+    divOpCount (optimizeBlock .top returnGuardBlock).ret = 1 ∧
+    execBlockCheckCost (env 4 3 0 0) returnGuardBlock = 3 ∧
+    execBlockCheckCost (env 4 3 0 0) (optimizeBlock .top returnGuardBlock) = 0 := by
+  decide
+
+theorem clobbered_failure_order_and_existing_ub :
+    evalGuard (env 4 3 0 0) (.conj xnz nz) = true ∧
+    evalBlock (env 4 3 0 0)
+      (failureBlock (.add (.checkedDiv (lit (-7)) (v 0)) ubExpr)) = .trap ∧
+    evalBlock (env 4 3 0 0)
+      (optimizeBlock (.conj xnz nz)
+        (failureBlock (.add (.checkedDiv (lit (-7)) (v 0)) ubExpr))) = .trap ∧
+    evalBlock (env 4 3 0 0)
+      (failureBlock (.add ubExpr (.checkedDiv (lit (-7)) (v 0)))) = .ub ∧
+    evalBlock (env 4 3 0 0)
+      (optimizeBlock (.conj xnz nz)
+        (failureBlock (.add ubExpr (.checkedDiv (lit (-7)) (v 0))))) = .ub ∧
+    evalBlock (env 4 3 0 0)
+      (failureBlock (.uncheckedDiv (lit (-7)) (v 0))) = .ub ∧
+    evalBlock (env 4 3 0 0)
+      (optimizeBlock (.conj xnz nz) (failureBlock (.uncheckedDiv (lit (-7)) (v 0)))) = .ub := by
+  decide
+
+/-- General soundness does not promise a complete polynomial arithmetic solver. -/
+theorem conservative_arithmetic_precision :
+    synthesizeStmtGuardIR conservativeBlock.body .top nz =
+      .nonZero (.add (.sub (.var 1) (.var 1)) (.lit 1)) ∧
+    checkedDivCount (optimizeBlock .top conservativeBlock).ret = 1 ∧
+    evalBlock (env 4 (-3) 0 0) conservativeBlock = .val (-7) ∧
+    evalBlock (env 4 (-3) 0 0) (optimizeBlock .top conservativeBlock) = .val (-7) := by
+  decide
+
+
+def states : List Env :=
+  [env 4 3 2 1, env 0 0 0 0, env (-2) (-3) 5 (-1),
+   env 4 (-1) 0 (-2), env 3 1 (-1) 0, env (-3) 0 2 7]
+def contexts : List GuardIR :=
+  [.top, xnz, .conj xnz nz, .eq (.var 1) (.lit 0), .nonZero (.mul (.var 1) (.var 2))]
+def guards : List GuardIR :=
+  [.top, .bot, xnz, nz, .eq (.var 1) (.lit 0), .eq (.var 1) (.lit (-3)),
+   .nonZero (.mul (.var 1) (.var 2)), .imp (.nonZero (.var 2)) nz]
+def statements : List Stmt :=
+  [.skip, .assign 1 (.add (.var 1) (.lit 1)), aliasSteps, clobberSteps,
+   asymmetricSteps, changedPathSteps, correlatedSteps, partialDiamond.body,
+   mutatingDeadBlock.body, falseBranchBlock.body, selfAliasBlock.body,
+   returnGuardBlock.body, conservativeBlock.body]
+def blocks : List BlockProg :=
+  [aliasBlock, clobberBlock, asymmetricBlock, partialDiamond, changedPathBlock,
+   correlatedBlock, mutatingDeadBlock, falseBranchBlock, selfAliasBlock,
+   returnGuardBlock, conservativeBlock,
+   failureBlock (.add (.checkedDiv (lit (-7)) (v 0)) ubExpr),
+   failureBlock (.add ubExpr (.checkedDiv (lit (-7)) (v 0))),
+   failureBlock (.uncheckedDiv (lit (-7)) (v 0))]
+def pullbackAgrees (rho : Env) (s : Stmt) (g : GuardIR) : Bool :=
+  decide (evalGuard rho (pullbackGuardIR s g) = evalGuard (execStmt s rho) g)
+def synthesisAgrees (rho : Env) (s : Stmt) (ctx g : GuardIR) : Bool :=
+  decide (evalGuard rho (synthesizeStmtGuardIR s ctx g) =
+    (!evalGuard rho ctx || evalGuard (execStmt s rho) g))
+def blockAgrees (rho : Env) (ctx : GuardIR) (p : BlockProg) : Bool :=
+  (!evalGuard rho ctx) || decide (evalBlock rho (optimizeBlock ctx p) = evalBlock rho p)
+
+theorem sweep_sizes :
+    states.length = 6 ∧ contexts.length = 5 ∧ guards.length = 8 ∧
+    statements.length = 13 ∧ blocks.length = 14 := by
+  decide
+
+/-- Every tested entry context has a concrete satisfying state in the sweep. -/
+theorem sweep_contexts_are_inhabited :
+    contexts.all (fun ctx => states.any (fun rho => evalGuard rho ctx)) = true := by
+  decide
+
+theorem pullback_semantic_sweep :
+    states.all (fun rho => statements.all (fun s =>
+      guards.all (pullbackAgrees rho s))) = true := by
+  decide
+
+/-- Tests false as well as true antecedents, without filtering out either case. -/
+theorem synthesis_semantic_sweep :
+    states.all (fun rho => statements.all (fun s => contexts.all (fun ctx =>
+      guards.all (synthesisAgrees rho s ctx)))) = true := by
+  decide
+
+theorem block_semantic_sweep :
+    states.all (fun rho => contexts.all (fun ctx =>
+      blocks.all (blockAgrees rho ctx))) = true := by
+  decide
+
+end CatSem.PostImplAudit.M2
+
+-- M2 compiler API and transitive dependency reports for every new audit declaration.
+#print axioms CatSem.pullbackGuardIR
+#print axioms CatSem.synthesizeStmtGuardIR
+#print axioms CatSem.optimizeBlock
+#print axioms CatSem.pullbackEval_stateTransfer_liftEval_iff
+#print axioms CatSem.pullbackGuardIR_denote
+#print axioms CatSem.pullbackGuardIR_seq
+#print axioms CatSem.synthesizeStmtGuardIR_denote
+#print axioms CatSem.synthesizeStmtGuardIR_universal
+#print axioms CatSem.synthesizeStmtGuardIR_diamond_sound
+#print axioms CatSem.synthesizeStmtGuardIR_lit_nonZero
+#print axioms CatSem.synthesizeStmtGuardIR_assign_self
+#print axioms CatSem.synthesizeStmtGuardIR_diamond_safe
+#print axioms CatSem.optimizeBlock_guardedEquiv
+#print axioms CatSem.optimizeBlock_sound
+#print axioms CatSem.optimizeBlock_literal_div_elim_param
+#print axioms CatSem.optimizeBlock_seq_clobber_elim_param
+#print axioms CatSem.optimizeBlock_clobber_trap_param
+#print axioms CatSem.optimizeBlock_diamond_elim_param
+#print axioms CatSem.optimizeBlock_dead_branch_elim_param
+#print axioms CatSem.PostImplAudit.M2.aliasSteps
+#print axioms CatSem.PostImplAudit.M2.aliasBlock
+#print axioms CatSem.PostImplAudit.M2.xnz
+#print axioms CatSem.PostImplAudit.M2.clobberSteps
+#print axioms CatSem.PostImplAudit.M2.clobberBlock
+#print axioms CatSem.PostImplAudit.M2.asymmetricSteps
+#print axioms CatSem.PostImplAudit.M2.asymmetricBlock
+#print axioms CatSem.PostImplAudit.M2.partialDiamond
+#print axioms CatSem.PostImplAudit.M2.changedPathSteps
+#print axioms CatSem.PostImplAudit.M2.changedPathBlock
+#print axioms CatSem.PostImplAudit.M2.correlatedSteps
+#print axioms CatSem.PostImplAudit.M2.correlatedBlock
+#print axioms CatSem.PostImplAudit.M2.mutatingDeadBlock
+#print axioms CatSem.PostImplAudit.M2.falseBranchBlock
+#print axioms CatSem.PostImplAudit.M2.selfAliasBlock
+#print axioms CatSem.PostImplAudit.M2.returnGuardBlock
+#print axioms CatSem.PostImplAudit.M2.conservativeBlock
+#print axioms CatSem.PostImplAudit.M2.failureBlock
+#print axioms CatSem.PostImplAudit.M2.self_assignment_is_simultaneous
+#print axioms CatSem.PostImplAudit.M2.multistep_aliasing_and_signed_reassignment
+#print axioms CatSem.PostImplAudit.M2.clobbered_fact_is_rejected
+#print axioms CatSem.PostImplAudit.M2.residual_guard_truth_table
+#print axioms CatSem.PostImplAudit.M2.arithmetic_guard_normalization
+#print axioms CatSem.PostImplAudit.M2.asymmetric_diamond_join
+#print axioms CatSem.PostImplAudit.M2.partial_diamond_preserves_trapping_arm
+#print axioms CatSem.PostImplAudit.M2.nested_condition_uses_reassigned_state
+#print axioms CatSem.PostImplAudit.M2.correlated_paths_prune_nested_dead_arms
+#print axioms CatSem.PostImplAudit.M2.dead_branch_context_can_be_killed
+#print axioms CatSem.PostImplAudit.M2.prefix_proves_false_branch
+#print axioms CatSem.PostImplAudit.M2.diamond_source_destination_alias
+#print axioms CatSem.PostImplAudit.M2.terminal_guard_and_compound_divisor
+#print axioms CatSem.PostImplAudit.M2.clobbered_failure_order_and_existing_ub
+#print axioms CatSem.PostImplAudit.M2.conservative_arithmetic_precision
+#print axioms CatSem.PostImplAudit.M2.states
+#print axioms CatSem.PostImplAudit.M2.contexts
+#print axioms CatSem.PostImplAudit.M2.guards
+#print axioms CatSem.PostImplAudit.M2.statements
+#print axioms CatSem.PostImplAudit.M2.blocks
+#print axioms CatSem.PostImplAudit.M2.pullbackAgrees
+#print axioms CatSem.PostImplAudit.M2.synthesisAgrees
+#print axioms CatSem.PostImplAudit.M2.blockAgrees
+#print axioms CatSem.PostImplAudit.M2.sweep_sizes
+#print axioms CatSem.PostImplAudit.M2.sweep_contexts_are_inhabited
+#print axioms CatSem.PostImplAudit.M2.pullback_semantic_sweep
+#print axioms CatSem.PostImplAudit.M2.synthesis_semantic_sweep
+#print axioms CatSem.PostImplAudit.M2.block_semantic_sweep

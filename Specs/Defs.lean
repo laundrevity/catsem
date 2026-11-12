@@ -402,4 +402,75 @@ example : divOpCount m1CancelExpr = 1 := rfl
 example : guardBranchCount m1BenchExpr = 0 := rfl
 example : execCheckCost (fun _ => 2) m1BenchExpr = 2 := rfl
 
+/-! ## Milestone 2: Trusted Computing Base (Imperative CFG Statements, Block Programs & Cost Observers) -/
+
+/-- Functional environment update assigning `val` to variable `v` without `Classical.choice`. -/
+def updateEnv (env : Env) (v : VarId) (val : Int) : Env :=
+  fun w => if decide (w = v) then val else env w
+
+/-- Structured imperative basic-block / diamond CFG statement syntax. -/
+inductive Stmt where
+  | skip
+  | assign (v : VarId) (rhs : PureExpr)
+  | seq (s₁ s₂ : Stmt)
+  | ite (cond : GuardIR) (thenBr elseBr : Stmt)
+  deriving DecidableEq, Repr
+
+/-- Total concrete operational state transition for `Stmt`. -/
+def execStmt : Stmt → Env → Env
+  | .skip, env => env
+  | .assign v rhs, env => updateEnv env v (evalPure env rhs)
+  | .seq s₁ s₂, env => execStmt s₂ (execStmt s₁ env)
+  | .ite cond thenBr elseBr, env =>
+    if evalGuard env cond then execStmt thenBr env else execStmt elseBr env
+
+/-- Imperative block program pairing a statement prefix `body` with a terminal expression `ret`. -/
+structure BlockProg where
+  body : Stmt
+  ret : Expr
+  deriving DecidableEq, Repr
+
+/-- Operational outcome of executing `prog.body` from `env` and evaluating `prog.ret` in the resulting state. -/
+def evalBlock (env : Env) (prog : BlockProg) : Outcome :=
+  evalExpr (execStmt prog.body env) prog.ret
+
+/-- Dynamic cost of runtime guard evaluations executed during `Stmt` in `env`. -/
+def stmtGuardCost : Env → Stmt → Nat
+  | _, .skip => 0
+  | _, .assign _ _ => 0
+  | env, .seq s₁ s₂ => stmtGuardCost env s₁ + stmtGuardCost (execStmt s₁ env) s₂
+  | env, .ite cond s₁ s₂ =>
+    guardEvalCost env cond + (if evalGuard env cond then stmtGuardCost env s₁ else stmtGuardCost env s₂)
+
+/-- Total dynamic check cost (statement branch guards + terminal expression checks) of `BlockProg` in `env`. -/
+def execBlockCheckCost (env : Env) (prog : BlockProg) : Nat :=
+  stmtGuardCost env prog.body + execCheckCost (execStmt prog.body env) prog.ret
+
+/-- Parametric sequential assignment/clobber benchmark block:
+    `d := x; x := 0; return (num / divVar) + ((y * divVar) / divVar)`. -/
+def mkClobberBlock (x d : VarId) (num y : PureExpr) (divVar : VarId) : BlockProg :=
+  { body := .seq (.assign d (.var x)) (.assign x (.lit 0))
+    ret := mkDualDivExpr num y (.var divVar) }
+
+/-- Parametric diamond safe-divisor benchmark block:
+    `if x == 0 then d := n else d := x; return (num / d) + ((y * d) / d)`. -/
+def mkDiamondSafeBlock (x d : VarId) (n : Int) (num y : PureExpr) : BlockProg :=
+  { body := .ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))
+    ret := mkDualDivExpr num y (.var d) }
+
+/-- Parametric dead-branch benchmark block:
+    `if p != 0 then d := n else d := 0; return (y * d) / d`. -/
+def mkDeadBranchBlock (p : PureExpr) (d : VarId) (n : Int) (y : PureExpr) : BlockProg :=
+  { body := .ite (.nonZero p) (.assign d (.lit n)) (.assign d (.lit 0))
+    ret := mkCancelExpr y (.var d) }
+
+-- Sanity checks on Milestone 2 TCB statement transitions, block evaluators, and cost observers
+example : updateEnv (fun _ => 3) 0 9 0 = 9 := rfl
+example : updateEnv (fun _ => 3) 0 9 1 = 3 := rfl
+example : evalBlock (fun v => if v = 0 then 2 else 6) (mkClobberBlock 0 1 (.lit 8) (.lit 5) 1) = .val 9 := rfl
+example : evalBlock (fun v => if v = 0 then 2 else 6) (mkClobberBlock 0 1 (.lit 8) (.lit 5) 0) = .trap := rfl
+example : evalBlock (fun _ => 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = .val 9 := rfl
+example : execBlockCheckCost (fun _ => 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = 3 := rfl
+example : evalBlock (fun _ => 1) (mkDeadBranchBlock (.var 0) 1 2 (.lit 7)) = .val 7 := rfl
+
 end CatSem

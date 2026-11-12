@@ -3074,6 +3074,626 @@ theorem generalized_zero_trap :
 
 end M1R2
 
+
+/-!
+## Milestone 2: imperative statement/block specification audit
+
+The candidate below implements capture-free pure/guard substitution and a
+structural weakest-precondition pullback for every Stmt. A constructive
+Boolean normalizer handles literals, equality to zero, and double negation,
+then reuses the independently proved M1 residual synthesizer.
+
+Block optimization prunes a proven top-level branch and collects safe
+terminal-divisor facts by querying the complete statement pullback. It
+optimizes the return under those facts, never treating a pre-state fact as
+an unchanged post-state fact. This candidate supports arbitrary statements
+and expressions; the target capability laws specify particular parametric
+families, not complete optimization of every equivalent CFG encoding.
+
+Obligations packages every compiler-dependent M2 theorem. The general
+state/lifting bridge is proved separately. The named witnesses include
+same-variable assignments, sequencing, clobbering, aliasing, updated-state
+costs, both diamond arms, and a branch guard invalidated by its assignment.
+The infinite injective literal family rules out finite fixture tables:
+eventual identity on that family contradicts parametric check elimination.
+No theorem or compiler stub from Specs.Target is invoked.
+-/
+
+namespace M2
+theorem update_same (env : Env) (v : VarId) (n : Int) : updateEnv env v n v = n := by
+  simp [updateEnv]
+theorem update_other (env : Env) (v w : VarId) (n : Int) (h : w ≠ v) :
+    updateEnv env v n w = env w := by simp [updateEnv, h]
+
+def substPure (v : VarId) (rhs : PureExpr) : PureExpr → PureExpr
+  | .lit n => .lit n
+  | .var w => if w = v then rhs else .var w
+  | .add l r => .add (substPure v rhs l) (substPure v rhs r)
+  | .sub l r => .sub (substPure v rhs l) (substPure v rhs r)
+  | .mul l r => .mul (substPure v rhs l) (substPure v rhs r)
+theorem substPure_eval (env : Env) (v : VarId) (rhs e : PureExpr) :
+    evalPure env (substPure v rhs e) = evalPure (updateEnv env v (evalPure env rhs)) e := by
+  induction e with
+  | lit n => rfl
+  | var w => by_cases h : w = v <;> simp [substPure, evalPure, updateEnv, h]
+  | add l r ihl ihr => simp [substPure, evalPure, ihl, ihr]
+  | sub l r ihl ihr => simp [substPure, evalPure, ihl, ihr]
+  | mul l r ihl ihr => simp [substPure, evalPure, ihl, ihr]
+
+def substGuard (v : VarId) (rhs : PureExpr) : GuardIR → GuardIR
+  | .top => .top
+  | .bot => .bot
+  | .nonZero p => .nonZero (substPure v rhs p)
+  | .eq p q => .eq (substPure v rhs p) (substPure v rhs q)
+  | .conj p q => .conj (substGuard v rhs p) (substGuard v rhs q)
+  | .imp p q => .imp (substGuard v rhs p) (substGuard v rhs q)
+theorem substGuard_eval (env : Env) (v : VarId) (rhs : PureExpr) (g : GuardIR) :
+    evalGuard env (substGuard v rhs g) =
+      evalGuard (updateEnv env v (evalPure env rhs)) g := by
+  induction g <;> simp_all [substGuard, evalGuard, substPure_eval]
+
+def wp : Stmt → GuardIR → GuardIR
+  | .skip, g => g
+  | .assign v rhs, g => substGuard v rhs g
+  | .seq s₁ s₂, g => wp s₁ (wp s₂ g)
+  | .ite c s₁ s₂, g => .conj (.imp c (wp s₁ g)) (.imp (.imp c .bot) (wp s₂ g))
+theorem wp_eval (s : Stmt) (g : GuardIR) (env : Env) :
+    evalGuard env (wp s g) = evalGuard (execStmt s env) g := by
+  induction s generalizing g env with
+  | skip => rfl
+  | assign v rhs => exact substGuard_eval env v rhs g
+  | seq s₁ s₂ ih₁ ih₂ => simp [wp, execStmt, ih₁, ih₂]
+  | ite c s₁ s₂ ih₁ ih₂ =>
+    cases hc : evalGuard env c <;> simp [wp, execStmt, evalGuard, hc, ih₁, ih₂]
+theorem wp_denote (s : Stmt) (g : GuardIR) :
+    denoteGuard (wp s g) = (stateTransfer (execStmt s)).pullback (denoteGuard g) := by
+  funext env
+  exact congrArg (fun b : Bool => b = true) (wp_eval s g env)
+theorem wp_seq (s₁ s₂ : Stmt) (g : GuardIR) :
+    denoteGuard (wp (.seq s₁ s₂) g) =
+      ((stateTransfer (execStmt s₁)).comp (stateTransfer (execStmt s₂))).pullback (denoteGuard g) := by
+  exact wp_denote (.seq s₁ s₂) g
+
+def foldNZ : PureExpr → GuardIR
+  | .lit n => if n = 0 then .bot else .top
+  | p => .nonZero p
+theorem foldNZ_eval (env : Env) (p : PureExpr) :
+    evalGuard env (foldNZ p) = evalGuard env (.nonZero p) := by
+  cases p <;> try rfl
+  rename_i n
+  by_cases h : n = 0 <;> simp [foldNZ, evalGuard, evalPure, h]
+
+def smartNot : GuardIR → GuardIR
+  | .imp a .bot => a
+  | g => .imp g .bot
+theorem smartNot_eval (env : Env) (g : GuardIR) :
+    evalGuard env (smartNot g) = !evalGuard env g := by
+  cases g with
+  | imp a b => cases b <;> simp [smartNot, evalGuard]
+  | _ => simp [smartNot, evalGuard]
+
+def smartAnd : GuardIR → GuardIR → GuardIR
+  | .top, g => g
+  | g, .top => g
+  | .bot, _ => .bot
+  | _, .bot => .bot
+  | a, b => .conj a b
+theorem smartAnd_eval (env : Env) (a b : GuardIR) :
+    evalGuard env (smartAnd a b) = (evalGuard env a && evalGuard env b) := by
+  cases a <;> cases b <;> simp [smartAnd, evalGuard]
+
+def smartImp (a b : GuardIR) : GuardIR :=
+  if a = b then .top else
+  match a, b with
+  | _, .top => .top
+  | .bot, _ => .top
+  | .top, g => g
+  | g, .bot => smartNot g
+  | a, b => .imp a b
+theorem smartImp_eval (env : Env) (a b : GuardIR) :
+    evalGuard env (smartImp a b) = (!evalGuard env a || evalGuard env b) := by
+  by_cases h : a = b
+  · subst b
+    cases evalGuard env a <;> simp [smartImp, evalGuard]
+  · cases a <;> cases b <;> simp [smartImp, h, smartNot_eval, evalGuard]
+
+def foldEq (p q : PureExpr) : GuardIR :=
+  match q with
+  | .lit n => if n = 0 then .imp (foldNZ p) .bot else .eq p q
+  | _ => .eq p q
+theorem foldEq_eval (env : Env) (p q : PureExpr) :
+    evalGuard env (foldEq p q) = evalGuard env (.eq p q) := by
+  cases q <;> try rfl
+  rename_i n
+  by_cases hn : n = 0
+  · subst n
+    by_cases hp : evalPure env p = 0 <;>
+      simp [foldEq, evalGuard, foldNZ_eval, evalPure, hp]
+  · simp [foldEq, hn]
+
+def norm : GuardIR → GuardIR
+  | .top => .top
+  | .bot => .bot
+  | .nonZero p => foldNZ p
+  | .eq p q => foldEq p q
+  | .conj a b => smartAnd (norm a) (norm b)
+  | .imp a b => smartImp (norm a) (norm b)
+theorem norm_eval (env : Env) (g : GuardIR) :
+    evalGuard env (norm g) = evalGuard env g := by
+  induction g <;> simp_all [norm, smartAnd_eval, smartImp_eval, foldNZ_eval, foldEq_eval, evalGuard]
+
+def synthStmt (s : Stmt) (a b : GuardIR) : GuardIR :=
+  M1R2.synth (norm a) (norm (wp s b))
+theorem synthStmt_eval (s : Stmt) (a b : GuardIR) (env : Env) :
+    evalGuard env (synthStmt s a b) = (!evalGuard env a || evalGuard (execStmt s env) b) := by
+  simp [synthStmt, M1R2.synth_eval, norm_eval, wp_eval]
+theorem synthStmt_denote (s : Stmt) (a b : GuardIR) :
+    denoteGuard (synthStmt s a b) =
+      synthesizeEdgeGuard (stateTransfer (execStmt s)) (denoteGuard a) (denoteGuard b) := by
+  funext env
+  apply propext
+  change evalGuard env (synthStmt s a b) = true ↔
+    (evalGuard env a = true → evalGuard (execStmt s env) b = true)
+  rw [synthStmt_eval]
+  cases evalGuard env a <;> cases evalGuard (execStmt s env) b <;> decide
+theorem synthStmt_universal (s : Stmt) (a b : GuardIR) (g : Env → Prop) :
+    ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a ⊓ g) (denoteGuard b) ↔
+      g ≤ denoteGuard (synthStmt s a b) := by
+  rw [synthStmt_denote]
+  exact Round2.edge_adjunction _ _ _ _
+theorem synth_literal (n : Int) (hn : n ≠ 0) :
+    synthStmt .skip .top (.nonZero (.lit n)) = .top := by
+  simp [synthStmt, wp, norm, foldNZ, hn, M1R2.synth]
+theorem synth_assign (v : VarId) (rhs : PureExpr) :
+    synthStmt (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top := by
+  cases rhs <;> simp [synthStmt, wp, substGuard, substPure, norm, foldNZ, M1R2.synth, M1R2.synthNZ]
+  rename_i n
+  by_cases hn : n = 0 <;> simp [hn]
+theorem synth_diamond (x d : VarId) (n : Int) (hn : n ≠ 0) :
+    synthStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      .top (.nonZero (.var d)) = .top := by
+  simp [synthStmt, wp, substGuard, substPure, norm, foldNZ, foldEq, hn,
+    smartAnd, smartImp, smartNot, M1R2.synth]
+theorem synth_sound (s : Stmt) (a b : GuardIR) (env : Env)
+    (ha : evalGuard env a = true) (hg : evalGuard env (synthStmt s a b) = true) :
+    evalGuard (execStmt s env) b = true := by
+  rw [synthStmt_eval, ha] at hg
+  simpa using hg
+theorem synth_top_sound (s : Stmt) (a b : GuardIR)
+    (h : synthStmt s a b = .top) (env : Env) (ha : evalGuard env a = true) :
+    evalGuard (execStmt s env) b = true := by
+  exact synth_sound s a b env ha (by rw [h]; rfl)
+
+def pruneTop (ctx : GuardIR) : Stmt → Stmt
+  | .ite c t f => if synthStmt .skip ctx c = .top then t else .ite c t f
+  | s => s
+theorem prune_sound (ctx : GuardIR) (s : Stmt) (env : Env) (hc : evalGuard env ctx = true) :
+    execStmt (pruneTop ctx s) env = execStmt s env := by
+  cases s with
+  | skip => rfl
+  | assign v rhs => rfl
+  | seq s₁ s₂ => rfl
+  | ite c t f =>
+    by_cases ht : synthStmt .skip ctx c = .top
+    · have hg : evalGuard env c = true := synth_top_sound .skip ctx c ht env hc
+      simp [pruneTop, ht, execStmt, hg]
+    · simp [pruneTop, ht]
+theorem synth_skip_self (p : PureExpr) : synthStmt .skip (.nonZero p) (.nonZero p) = .top := by
+  cases p <;> simp [synthStmt, wp, norm, foldNZ, M1R2.synth, M1R2.synthNZ]
+  rename_i n
+  by_cases h : n = 0 <;> simp [h]
+theorem prune_dead (p : PureExpr) (d : VarId) (n : Int) :
+    pruneTop (.nonZero p) (.ite (.nonZero p) (.assign d (.lit n)) (.assign d (.lit 0))) =
+      .assign d (.lit n) := by
+  simp [pruneTop, synth_skip_self]
+theorem prune_diamond (x d : VarId) (n : Int) :
+    pruneTop .top (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) =
+      .ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)) := by
+  simp [pruneTop, synthStmt, wp, norm, foldEq, foldNZ, M1R2.synth, M1R2.shrink]
+
+def denomFact (ctx : GuardIR) (s : Stmt) (d : PureExpr) : GuardIR :=
+  if synthStmt s ctx (.nonZero d) = .top then .nonZero d else .top
+theorem denomFact_sound (ctx : GuardIR) (s : Stmt) (d : PureExpr) (env : Env)
+    (hc : evalGuard env ctx = true) :
+    evalGuard (execStmt s env) (denomFact ctx s d) = true := by
+  unfold denomFact
+  split
+  · rename_i h
+    exact synth_top_sound s ctx (.nonZero d) h env hc
+  · rfl
+
+def facts (ctx : GuardIR) (s : Stmt) : Expr → GuardIR
+  | .pure _ => .top
+  | .add l r | .sub l r | .mul l r => .conj (facts ctx s l) (facts ctx s r)
+  | .checkedDiv n d | .uncheckedDiv n d =>
+      .conj (.conj (facts ctx s n) (facts ctx s d))
+        (match d with | .pure p => denomFact ctx s p | _ => .top)
+  | .iteGuard _ t f => .conj (facts ctx s t) (facts ctx s f)
+theorem facts_sound (ctx : GuardIR) (s : Stmt) (e : Expr) (env : Env)
+    (hc : evalGuard env ctx = true) :
+    evalGuard (execStmt s env) (facts ctx s e) = true := by
+  induction e with
+  | pure p => rfl
+  | add l r ihl ihr | sub l r ihl ihr | mul l r ihl ihr =>
+    simp [facts, evalGuard, ihl, ihr]
+  | iteGuard g t f iht ihf => simp [facts, evalGuard, iht, ihf]
+  | checkedDiv n d ihn ihd | uncheckedDiv n d ihn ihd =>
+    simp only [facts, evalGuard, ihn, ihd, Bool.true_and]
+    cases d with
+    | pure p => exact denomFact_sound ctx s p env hc
+    | _ => rfl
+
+def blockOpt (ctx : GuardIR) (p : BlockProg) : BlockProg :=
+  let body := pruneTop ctx p.body
+  {body := body, ret := M1R2.opt (facts ctx body p.ret) p.ret}
+theorem block_sound (ctx : GuardIR) (p : BlockProg) (env : Env)
+    (hc : evalGuard env ctx = true) :
+    evalBlock env (blockOpt ctx p) = evalBlock env p := by
+  change evalExpr (execStmt (pruneTop ctx p.body) env)
+    (M1R2.opt (facts ctx (pruneTop ctx p.body) p.ret) p.ret) =
+      evalExpr (execStmt p.body env) p.ret
+  rw [M1R2.opt_sound _ _ _ (facts_sound ctx _ p.ret env hc), prune_sound ctx p.body env hc]
+theorem block_guarded (ctx : GuardIR) (p : BlockProg) :
+    GuardedEquiv (liftEval evalBlock) (denoteGuard ctx) (blockOpt ctx p) p := by
+  exact (M1.lift_bridge evalBlock _ _ _).mpr (block_sound ctx p)
+
+theorem facts_dual_hasNZ (ctx : GuardIR) (s : Stmt) (x y d : PureExpr)
+    (h : synthStmt s ctx (.nonZero d) = .top) :
+    M1R2.hasNZ (facts ctx s (mkDualDivExpr x y d)) d = true := by
+  simp [facts, mkDualDivExpr, denomFact, h, M1R2.hasNZ]
+theorem facts_dual_not_top (ctx : GuardIR) (s : Stmt) (x y d : PureExpr) :
+    facts ctx s (mkDualDivExpr x y d) ≠ .top := by
+  simp [facts, mkDualDivExpr]
+theorem core_dual (ctx : GuardIR) (x y d : PureExpr) (h : M1R2.hasNZ ctx d = true) :
+    M1R2.core ctx (mkDualDivExpr x y d) = M1R2.fastDual x y d := by
+  simp [M1R2.core, M1R2.smartDiv, mkDualDivExpr, M1R2.fastDual, h]
+theorem block_dual_ret (ctx : GuardIR) (s : Stmt) (x y d : PureExpr)
+    (h : synthStmt (pruneTop ctx s) ctx (.nonZero d) = .top) :
+    (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}).ret = M1R2.fastDual x y d := by
+  change M1R2.opt (facts ctx (pruneTop ctx s) (mkDualDivExpr x y d)) (mkDualDivExpr x y d) = _
+  rw [M1R2.opt, ite_eq_right (facts_dual_not_top _ _ _ _ _)]
+  exact core_dual _ _ _ _ (facts_dual_hasNZ _ _ _ _ _ h)
+theorem fast_metrics (x y d : PureExpr) (env : Env) :
+    checkedDivCount (M1R2.fastDual x y d) = 0 ∧
+    divOpCount (M1R2.fastDual x y d) ≤ 1 ∧
+    guardBranchCount (M1R2.fastDual x y d) = 0 ∧
+    execCheckCost env (M1R2.fastDual x y d) = 0 := by
+  by_cases hd : evalPure env d = 0 <;>
+    simp [M1R2.fastDual, checkedDivCount, divOpCount, guardBranchCount, execCheckCost, evalExpr, hd]
+theorem block_dual_metrics (ctx : GuardIR) (s : Stmt) (x y d : PureExpr) (env : Env)
+    (h : synthStmt (pruneTop ctx s) ctx (.nonZero d) = .top) :
+    checkedDivCount (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}).ret = 0 ∧
+    divOpCount (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}).ret ≤ 1 ∧
+    guardBranchCount (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}).ret = 0 ∧
+    execBlockCheckCost env (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}) =
+      stmtGuardCost env (pruneTop ctx s) := by
+  have hr := block_dual_ret ctx s x y d h
+  have hm := fast_metrics x y d (execStmt (pruneTop ctx s) env)
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · rw [hr]; exact hm.1
+  · rw [hr]; exact hm.2.1
+  · rw [hr]; exact hm.2.2.1
+  · unfold execBlockCheckCost
+    rw [hr, show (blockOpt ctx {body := s, ret := mkDualDivExpr x y d}).body = pruneTop ctx s from rfl,
+      hm.2.2.2, Nat.add_zero]
+
+theorem literal_elim (num y : PureExpr) (n : Int) (hn : n ≠ 0) (env : Env) :
+    let prog : BlockProg := {body := .skip, ret := mkDualDivExpr num y (.lit n)}
+    checkedDivCount (blockOpt .top prog).ret = 0 ∧
+    divOpCount (blockOpt .top prog).ret ≤ 1 ∧
+    guardBranchCount (blockOpt .top prog).ret = 0 ∧ execBlockCheckCost env (blockOpt .top prog) = 0 := by
+  exact block_dual_metrics .top .skip num y (.lit n) env (synth_literal n hn)
+theorem synth_clobber (x d : VarId) (hxd : d ≠ x) :
+    synthStmt (.seq (.assign d (.var x)) (.assign x (.lit 0)))
+      (.nonZero (.var x)) (.nonZero (.var d)) = .top := by
+  simp [synthStmt, wp, substGuard, substPure, hxd, norm, foldNZ, M1R2.synth, M1R2.synthNZ]
+theorem clobber_elim (x d : VarId) (hxd : d ≠ x) (num y : PureExpr) (env : Env) :
+    checkedDivCount (blockOpt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+    divOpCount (blockOpt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret ≤ 1 ∧
+    guardBranchCount (blockOpt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+    execBlockCheckCost env (blockOpt (.nonZero (.var x)) (mkClobberBlock x d num y d)) = 0 := by
+  exact block_dual_metrics (.nonZero (.var x)) _ num y (.var d) env (synth_clobber x d hxd)
+
+theorem diamond_nonzero (x d : VarId) (n : Int) (hn : n ≠ 0) (env : Env) :
+    execStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env d ≠ 0 := by
+  by_cases hx : env x = 0 <;> simp [execStmt, evalGuard, evalPure, updateEnv, hx, hn]
+theorem diamond_cost (x d : VarId) (n : Int) (env : Env) :
+    stmtGuardCost env (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) = 1 := by
+  simp [stmtGuardCost, guardEvalCost]
+theorem dual_cost (x y d : PureExpr) (env : Env) (hd : evalPure env d ≠ 0) :
+    execCheckCost env (mkDualDivExpr x y d) = 2 := by
+  simp [mkDualDivExpr, execCheckCost, evalExpr, hd]
+theorem diamond_elim (x d : VarId) (n : Int) (hn : n ≠ 0) (num y : PureExpr) (env : Env) :
+    checkedDivCount (blockOpt .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+    divOpCount (blockOpt .top (mkDiamondSafeBlock x d n num y)).ret ≤ 1 ∧
+    guardBranchCount (blockOpt .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+    execBlockCheckCost env (blockOpt .top (mkDiamondSafeBlock x d n num y)) ≤ 1 ∧
+    execBlockCheckCost env (mkDiamondSafeBlock x d n num y) = 3 := by
+  have hs : synthStmt
+      (pruneTop .top (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))))
+      .top (.nonZero (.var d)) = .top := by
+    rw [prune_diamond]
+    exact synth_diamond x d n hn
+  have hm := block_dual_metrics .top _ num y (.var d) env hs
+  refine ⟨hm.1, hm.2.1, hm.2.2.1, ?_, ?_⟩
+  · unfold mkDiamondSafeBlock
+    rw [hm.2.2.2, prune_diamond, diamond_cost]
+  · simp only [execBlockCheckCost, mkDiamondSafeBlock]
+    rw [diamond_cost, dual_cost num y (.var d)
+      (execStmt (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x))) env)
+      (diamond_nonzero x d n hn env)]
+
+theorem synth_assign_lit (ctx : GuardIR) (d : VarId) (n : Int) (hn : n ≠ 0) :
+    synthStmt (.assign d (.lit n)) ctx (.nonZero (.var d)) = .top := by
+  simp [synthStmt, wp, substGuard, substPure, norm, foldNZ, hn, M1R2.synth_top_right]
+theorem facts_cancel_hasNZ (ctx : GuardIR) (s : Stmt) (y d : PureExpr)
+    (h : synthStmt s ctx (.nonZero d) = .top) :
+    M1R2.hasNZ (facts ctx s (mkCancelExpr y d)) d = true := by
+  simp [facts, mkCancelExpr, denomFact, h]
+theorem facts_cancel_not_top (ctx : GuardIR) (s : Stmt) (y d : PureExpr) :
+    facts ctx s (mkCancelExpr y d) ≠ .top := by
+  simp [facts, mkCancelExpr]
+theorem block_cancel_ret (ctx : GuardIR) (s : Stmt) (y d : PureExpr)
+    (h : synthStmt (pruneTop ctx s) ctx (.nonZero d) = .top) :
+    (blockOpt ctx {body := s, ret := mkCancelExpr y d}).ret = .pure y := by
+  change M1R2.opt (facts ctx (pruneTop ctx s) (mkCancelExpr y d)) (mkCancelExpr y d) = _
+  rw [M1R2.opt, ite_eq_right (facts_cancel_not_top _ _ _ _)]
+  exact M1R2.core_cancel_right _ _ _ (facts_cancel_hasNZ _ _ _ _ h)
+theorem dead_elim (p : PureExpr) (d : VarId) (n : Int) (hn : n ≠ 0) (y : PureExpr) (env : Env) :
+    checkedDivCount (blockOpt (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+    divOpCount (blockOpt (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+    execBlockCheckCost env (blockOpt (.nonZero p) (mkDeadBranchBlock p d n y)) = 0 := by
+  have hs : synthStmt
+      (pruneTop (.nonZero p) (.ite (.nonZero p) (.assign d (.lit n)) (.assign d (.lit 0))))
+      (.nonZero p) (.nonZero (.var d)) = .top := by
+    rw [prune_dead]
+    exact synth_assign_lit _ _ _ hn
+  have hr : (blockOpt (.nonZero p) (mkDeadBranchBlock p d n y)).ret = .pure y :=
+    block_cancel_ret (.nonZero p) _ y (.var d) hs
+  have hb : (blockOpt (.nonZero p) (mkDeadBranchBlock p d n y)).body = .assign d (.lit n) := by
+    exact prune_dead p d n
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hr]; rfl
+  · rw [hr]; rfl
+  · unfold execBlockCheckCost
+    rw [hb, hr]
+    rfl
+
+theorem clobber_trap (x d : VarId) (num y : PureExpr) (env : Env)
+    (hx : evalGuard env (.nonZero (.var x)) = true) :
+    evalBlock env (blockOpt (.nonZero (.var x)) (mkClobberBlock x d num y x)) = .trap := by
+  rw [block_sound _ _ env hx]
+  simp [evalBlock, mkClobberBlock, mkDualDivExpr, evalExpr, evalPure, execStmt, updateEnv]
+
+theorem state_lift_bridge {S₁ S₂ Term Out : Type*}
+    (step : S₁ → S₂) (run : S₂ → Term → Out) (P : S₁ → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (pullbackEval (stateTransfer step) (liftEval run)) P t₁ t₂ ↔
+      ∀ s, P s → run (step s) t₁ = run (step s) t₂ := by
+  constructor
+  · intro h s hs
+    have he := h P le_rfl
+    have ho : liftEval run ((stateTransfer step).post P) t₂ (step s) (run (step s) t₁) :=
+      Eq.mp (congrFun (congrFun he (step s)) (run (step s) t₁)) ⟨⟨s, rfl, hs⟩, rfl⟩
+    exact ho.2.symm
+  · intro h Q hQP
+    funext s₂ out
+    apply propext
+    constructor
+    · rintro ⟨⟨s, he, hs⟩, ho⟩
+      cases he
+      exact ⟨⟨s, rfl, hs⟩, (h s (hQP s hs)).symm.trans ho⟩
+    · rintro ⟨⟨s, he, hs⟩, ho⟩
+      cases he
+      exact ⟨⟨s, rfl, hs⟩, (h s (hQP s hs)).trans ho⟩
+theorem synth_diamond_sound (s₁ s₂ : Stmt) (ctx req : GuardIR) (e₁ e₂ : Expr)
+    (h : GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂) :
+    let g := GuardIR.conj (synthStmt s₁ ctx req) (synthStmt s₂ ctx req)
+    ∀ env, evalGuard env ctx = true → evalGuard env g = true →
+      evalExpr (execStmt s₁ env) e₁ = evalExpr (execStmt s₁ env) e₂ ∧
+      evalExpr (execStmt s₂ env) e₁ = evalExpr (execStmt s₂ env) e₂ := by
+  intro g env hc hg
+  change (evalGuard env (synthStmt s₁ ctx req) && evalGuard env (synthStmt s₂ ctx req)) = true at hg
+  simp only [Bool.and_eq_true] at hg
+  have he := (M1.lift_bridge evalExpr (denoteGuard req) e₁ e₂).mp h
+  exact ⟨he _ (synth_sound s₁ ctx req env hc hg.1), he _ (synth_sound s₂ ctx req env hc hg.2)⟩
+
+structure Obligations
+    (pb : Stmt → GuardIR → GuardIR) (sg : Stmt → GuardIR → GuardIR → GuardIR)
+    (opt : GuardIR → BlockProg → BlockProg) : Prop where
+  pullback : ∀ s g, denoteGuard (pb s g) = (stateTransfer (execStmt s)).pullback (denoteGuard g)
+  sequence : ∀ s₁ s₂ g, denoteGuard (pb (.seq s₁ s₂) g) =
+    ((stateTransfer (execStmt s₁)).comp (stateTransfer (execStmt s₂))).pullback (denoteGuard g)
+  denote : ∀ s a b, denoteGuard (sg s a b) =
+    synthesizeEdgeGuard (stateTransfer (execStmt s)) (denoteGuard a) (denoteGuard b)
+  universal : ∀ s a b (g : Env → Prop),
+    ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a ⊓ g) (denoteGuard b) ↔ g ≤ denoteGuard (sg s a b)
+  diamondSound : ∀ s₁ s₂ ctx req e₁ e₂,
+    GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂ →
+      let g := GuardIR.conj (sg s₁ ctx req) (sg s₂ ctx req)
+      ∀ env, evalGuard env ctx = true → evalGuard env g = true →
+        evalExpr (execStmt s₁ env) e₁ = evalExpr (execStmt s₁ env) e₂ ∧
+        evalExpr (execStmt s₂ env) e₁ = evalExpr (execStmt s₂ env) e₂
+  literalGuard : ∀ n : Int, n ≠ 0 → sg .skip .top (.nonZero (.lit n)) = .top
+  assignGuard : ∀ v rhs, sg (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top
+  diamondGuard : ∀ x d (n : Int), n ≠ 0 →
+    sg (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      .top (.nonZero (.var d)) = .top
+  guarded : ∀ ctx p, GuardedEquiv (liftEval evalBlock) (denoteGuard ctx) (opt ctx p) p
+  sound : ∀ ctx p env, evalGuard env ctx = true → evalBlock env (opt ctx p) = evalBlock env p
+  literal : ∀ num y (n : Int), n ≠ 0 → ∀ env,
+    let p : BlockProg := {body := .skip, ret := mkDualDivExpr num y (.lit n)}
+    checkedDivCount (opt .top p).ret = 0 ∧ divOpCount (opt .top p).ret ≤ 1 ∧
+      guardBranchCount (opt .top p).ret = 0 ∧ execBlockCheckCost env (opt .top p) = 0
+  clobber : ∀ x d, d ≠ x → ∀ num y env,
+    checkedDivCount (opt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+    divOpCount (opt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret ≤ 1 ∧
+    guardBranchCount (opt (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+    execBlockCheckCost env (opt (.nonZero (.var x)) (mkClobberBlock x d num y d)) = 0
+  clobberTrap : ∀ x d num y env, evalGuard env (.nonZero (.var x)) = true →
+    evalBlock env (opt (.nonZero (.var x)) (mkClobberBlock x d num y x)) = .trap
+  diamond : ∀ x d (n : Int), n ≠ 0 → ∀ num y env,
+    checkedDivCount (opt .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+    divOpCount (opt .top (mkDiamondSafeBlock x d n num y)).ret ≤ 1 ∧
+    guardBranchCount (opt .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+    execBlockCheckCost env (opt .top (mkDiamondSafeBlock x d n num y)) ≤ 1 ∧
+    execBlockCheckCost env (mkDiamondSafeBlock x d n num y) = 3
+  dead : ∀ p d (n : Int), n ≠ 0 → ∀ y env,
+    checkedDivCount (opt (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+    divOpCount (opt (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+    execBlockCheckCost env (opt (.nonZero p) (mkDeadBranchBlock p d n y)) = 0
+
+theorem all_obligations : Obligations wp synthStmt blockOpt where
+  pullback := wp_denote
+  sequence := wp_seq
+  denote := synthStmt_denote
+  universal := synthStmt_universal
+  diamondSound := synth_diamond_sound
+  literalGuard := synth_literal
+  assignGuard := synth_assign
+  diamondGuard := synth_diamond
+  guarded := block_guarded
+  sound := block_sound
+  literal := literal_elim
+  clobber := clobber_elim
+  clobberTrap := clobber_trap
+  diamond := diamond_elim
+  dead := dead_elim
+theorem satisfiable :
+    ∃ (pb : Stmt → GuardIR → GuardIR) (sg : Stmt → GuardIR → GuardIR → GuardIR)
+      (opt : GuardIR → BlockProg → BlockProg), Obligations pb sg opt := by
+  exact ⟨wp, synthStmt, blockOpt, all_obligations⟩
+
+def env (x : Int) : Env := fun v => if v = 0 then x else 6
+def literalFamily (k : Nat) : BlockProg :=
+  {body := .skip, ret := mkDualDivExpr (.var k) (.lit 5) (.lit 2)}
+theorem literal_family_injective : Function.Injective literalFamily := by
+  intro a b h
+  simpa [literalFamily, mkDualDivExpr] using h
+
+/-- No optimizer that is eventually identity on this infinite fresh-variable family can pass. -/
+theorem finite_fixture_rejected
+    (pb : Stmt → GuardIR → GuardIR) (sg : Stmt → GuardIR → GuardIR → GuardIR)
+    (opt : GuardIR → BlockProg → BlockProg) (h : Obligations pb sg opt) :
+    ¬ ∃ N : Nat, ∀ k, N < k → opt .top (literalFamily k) = literalFamily k := by
+  rintro ⟨N, hfix⟩
+  have he := hfix (N + 1) (by omega)
+  have bad := (h.literal (.var (N + 1)) (.lit 5) 2 (by decide) (env 0)).1
+  change checkedDivCount (opt .top (literalFamily (N + 1))).ret = 0 at bad
+  rw [he] at bad
+  change (2 : Nat) = 0 at bad
+  cases bad
+
+theorem identity_rejected (pb : Stmt → GuardIR → GuardIR)
+    (sg : Stmt → GuardIR → GuardIR → GuardIR) :
+    ¬ Obligations pb sg (fun _ p => p) := by
+  intro h
+  exact finite_fixture_rejected pb sg _ h ⟨0, fun _ _ => rfl⟩
+theorem bot_synthesis_rejected (pb : Stmt → GuardIR → GuardIR)
+    (opt : GuardIR → BlockProg → BlockProg) : ¬ Obligations pb (fun _ _ _ => .bot) opt := by
+  intro h
+  have he := congrFun (h.denote .skip .top .top) (env 0)
+  have hb : denoteGuard .bot (env 0) := Eq.mpr he (fun _ => rfl)
+  change false = true at hb
+  cases hb
+theorem top_synthesis_rejected (pb : Stmt → GuardIR → GuardIR)
+    (opt : GuardIR → BlockProg → BlockProg) : ¬ Obligations pb (fun _ _ _ => .top) opt := by
+  intro h
+  have he := congrFun (h.denote .skip .top .bot) (env 0)
+  have hb : synthesizeEdgeGuard (stateTransfer (execStmt .skip)) (denoteGuard .top)
+      (denoteGuard .bot) (env 0) := Eq.mp he rfl
+  have bad := hb rfl
+  change false = true at bad
+  cases bad
+theorem raw_imp_rejected (opt : GuardIR → BlockProg → BlockProg) :
+    ¬ Obligations wp (fun s a b => .imp a (wp s b)) opt := by
+  intro h
+  have bad := h.literalGuard 2 (by decide)
+  cases bad
+
+theorem assignment_reads_old_state :
+    execStmt (.assign 0 (.add (.var 0) (.lit 1))) (env 2) 0 = 3 ∧
+    execStmt (.assign 0 (.add (.var 0) (.lit 1))) (env 2) 1 = 6 := by decide
+theorem sequence_and_clobber :
+    execStmt (.seq (.assign 1 (.var 0)) (.assign 0 (.lit 0))) (env 2) 1 = 2 ∧
+    execStmt (.seq (.assign 1 (.var 0)) (.assign 0 (.lit 0))) (env 2) 0 = 0 ∧
+    evalBlock (env 2) (mkClobberBlock 0 1 (.var 0) (.var 1) 1) = .val 2 ∧
+    evalBlock (env 2) (mkClobberBlock 0 1 (.lit 8) (.lit 5) 0) = .trap := by decide
+theorem backwards_substitution_order :
+    evalGuard (env 2) (wp (.seq (.assign 1 (.var 0)) (.assign 0 (.lit 0))) (.nonZero (.var 1))) = true ∧
+    evalGuard (env 2) (wp (.assign 0 (.lit 0)) (wp (.assign 1 (.var 0)) (.nonZero (.var 1)))) = false := by
+  decide
+theorem cost_uses_updated_state :
+    stmtGuardCost (env 2) (.seq (.assign 0 (.lit 0))
+      (.ite (.nonZero (.var 0)) (.ite (.nonZero (.var 1)) .skip .skip) .skip)) = 1 ∧
+    execBlockCheckCost (env 2)
+      {body := .assign 0 (.lit 0), ret := .checkedDiv (.pure (.lit 8)) (.pure (.var 0))} = 1 := by
+  decide
+theorem literal_positive :
+    evalBlock (env 2) (literalFamily 7) = .val 8 ∧
+    evalBlock (env 2) (blockOpt .top (literalFamily 7)) = .val 8 ∧
+    execBlockCheckCost (env 2) (literalFamily 7) = 2 ∧
+    execBlockCheckCost (env 2) (blockOpt .top (literalFamily 7)) = 0 := by decide
+theorem clobber_positive :
+    evalGuard (env 2) (.nonZero (.var 0)) = true ∧
+    evalBlock (env 2) (blockOpt (.nonZero (.var 0)) (mkClobberBlock 0 1 (.lit 8) (.lit 5) 1)) = .val 9 ∧
+    execBlockCheckCost (env 2) (blockOpt (.nonZero (.var 0)) (mkClobberBlock 0 1 (.lit 8) (.lit 5) 1)) = 0 := by
+  decide
+theorem alias_negative :
+    evalBlock (env 2) (mkClobberBlock 0 0 (.lit 8) (.lit 5) 0) = .trap ∧
+    evalBlock (env 2) (blockOpt (.nonZero (.var 0)) (mkClobberBlock 0 0 (.lit 8) (.lit 5) 0)) = .trap := by
+  decide
+theorem stale_nonzero_fact_rejected :
+    let source := mkClobberBlock 0 1 (.lit 8) (.lit 5) 0
+    let bad : BlockProg := {body := source.body, ret := M1R2.fastDual (.lit 8) (.lit 5) (.var 0)}
+    evalGuard (env 2) (.nonZero (.var 0)) = true ∧
+    evalBlock (env 2) source = .trap ∧ evalBlock (env 2) bad = .ub := by decide
+theorem diamond_both_branches :
+    evalBlock (env 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = .val 9 ∧
+    evalBlock (env 2) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = .val 9 ∧
+    execBlockCheckCost (env 0) (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5)) = 3 ∧
+    execBlockCheckCost (env 0) (blockOpt .top (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5))) = 1 ∧
+    execBlockCheckCost (env 2) (blockOpt .top (mkDiamondSafeBlock 0 1 2 (.lit 8) (.lit 5))) = 1 := by decide
+theorem diamond_alias_and_zero :
+    evalBlock (env 0) (blockOpt .top (mkDiamondSafeBlock 0 0 2 (.lit 8) (.lit 5))) = .val 9 ∧
+    evalBlock (env 0) (mkDiamondSafeBlock 0 1 0 (.lit 8) (.lit 5)) = .trap := by decide
+theorem dead_branch_mutates_guard_variable :
+    let p : PureExpr := .sub (.var 1) (.lit 2)
+    let rho : Env := fun _ => 3
+    let prog := mkDeadBranchBlock p 1 2 (.var 1)
+    evalGuard rho (.nonZero p) = true ∧
+    evalGuard (execStmt prog.body rho) (.nonZero p) = false ∧
+    evalBlock rho prog = .val 2 ∧ evalBlock rho (blockOpt (.nonZero p) prog) = .val 2 ∧
+    execBlockCheckCost rho (blockOpt (.nonZero p) prog) = 0 := by decide
+theorem assignment_can_kill_context :
+    let p : PureExpr := .sub (.var 1) (.lit 2)
+    let rho : Env := fun _ => 3
+    evalGuard rho (synthStmt (.assign 1 (.lit 2)) (.nonZero p) (.nonZero p)) = false := by decide
+
+/-- A wrapper outside all named benchmark bodies is handled by the general pullback analysis. -/
+theorem wrapped_diamond :
+    let original := mkDiamondSafeBlock 7 9 (-2) (.lit 8) (.lit 5)
+    let prog : BlockProg := {body := .seq .skip original.body, ret := original.ret}
+    let rho : Env := fun _ => 0
+    evalBlock rho prog = .val 1 ∧ evalBlock rho (blockOpt .top prog) = .val 1 ∧
+    checkedDivCount (blockOpt .top prog).ret = 0 ∧ execBlockCheckCost rho (blockOpt .top prog) = 1 := by
+  decide
+
+
+/-- Finite literal fixtures with a raw implication fallback cannot satisfy guard normalization. -/
+theorem finite_guard_fixture_rejected
+    (pb : Stmt → GuardIR → GuardIR) (sg : Stmt → GuardIR → GuardIR → GuardIR)
+    (opt : GuardIR → BlockProg → BlockProg) (h : Obligations pb sg opt) :
+    ¬ ∃ N : Nat, ∀ k, N < k →
+      sg .skip .top (.nonZero (.lit (Int.ofNat k))) =
+        .imp .top (.nonZero (.lit (Int.ofNat k))) := by
+  rintro ⟨N, hfix⟩
+  have he := hfix (N + 1) (by omega)
+  have hn : Int.ofNat (N + 1) ≠ 0 := by simp; omega
+  rw [h.literalGuard _ hn] at he
+  cases he
+
+end M2
+
 end CatSem.RedTeam
 
 /- This check is intentionally outside the semantic namespace: it inspects

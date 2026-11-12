@@ -482,4 +482,149 @@ theorem optimizeExpr_zero_div_trap_param (x y d : PureExpr) (env : Env)
     evalExpr env (optimizeExpr .top (mkDualDivExpr x y d)) = .trap := by
   sorry
 
+/-! ## Milestone 2: Imperative CFG Statements, Syntactic Pullbacks & Diamond Block Optimization -/
+
+/-- Computable syntactic weakest-precondition pullback of a `GuardIR` across an imperative `Stmt`. -/
+def pullbackGuardIR (s : Stmt) (g : GuardIR) : GuardIR :=
+  sorry
+
+/-- Computable edge guard synthesis across an imperative `Stmt` from pre-context `a` to post-guard `b`. -/
+def synthesizeStmtGuardIR (s : Stmt) (a b : GuardIR) : GuardIR :=
+  sorry
+
+/-- Computable context-sensitive block optimizer across `BlockProg` statement prefixes and return expressions. -/
+def optimizeBlock (ctx : GuardIR) (prog : BlockProg) : BlockProg :=
+  sorry
+
+/-- Pulled-Back State-Transfer Lifting Equivalence: `GuardedEquiv` along
+    `pullbackEval (stateTransfer step) (liftEval run)` at predicate `P` holds if and only if
+    `t₁` and `t₂` produce identical concrete outcomes in `step s` whenever `P s` holds. -/
+theorem pullbackEval_stateTransfer_liftEval_iff {Out : Type*}
+    (step : S₁ → S₂) (run : S₂ → Term → Out) (P : S₁ → Prop) (t₁ t₂ : Term) :
+    GuardedEquiv (pullbackEval (stateTransfer step) (liftEval run)) P t₁ t₂ ↔
+      ∀ s, P s → run (step s) t₁ = run (step s) t₂ := by
+  sorry
+
+/-- Categorical Realization of `pullbackGuardIR`: Denotation commutes with `(stateTransfer (execStmt s)).pullback`. -/
+theorem pullbackGuardIR_denote (s : Stmt) (g : GuardIR) :
+    denoteGuard (pullbackGuardIR s g) =
+      (stateTransfer (execStmt s)).pullback (denoteGuard g) := by
+  sorry
+
+/-- Contravariant Compositionality of `pullbackGuardIR` on Sequential Statements:
+    Denotation on `.seq s₁ s₂` equals the composed `CFGTransfer` pullback. -/
+theorem pullbackGuardIR_seq (s₁ s₂ : Stmt) (g : GuardIR) :
+    denoteGuard (pullbackGuardIR (.seq s₁ s₂) g) =
+      ((stateTransfer (execStmt s₁)).comp (stateTransfer (execStmt s₂))).pullback (denoteGuard g) := by
+  sorry
+
+/-- Categorical Realization of `synthesizeStmtGuardIR`: Denotation commutes with abstract `synthesizeEdgeGuard`
+    along `stateTransfer (execStmt s)`. -/
+theorem synthesizeStmtGuardIR_denote (s : Stmt) (a b : GuardIR) :
+    denoteGuard (synthesizeStmtGuardIR s a b) =
+      synthesizeEdgeGuard (stateTransfer (execStmt s)) (denoteGuard a) (denoteGuard b) := by
+  sorry
+
+/-- Universal Property (Kripke-Joyal / Galois Adjunction) of `synthesizeStmtGuardIR`:
+    `ForcesAfter` across `execStmt s` under `denoteGuard a ⊓ g` holds iff `g` implies the synthesized guard. -/
+theorem synthesizeStmtGuardIR_universal (s : Stmt) (a b : GuardIR) (g : Env → Prop) :
+    ForcesAfter (stateTransfer (execStmt s)) (denoteGuard a ⊓ g) (denoteGuard b) ↔
+      g ≤ denoteGuard (synthesizeStmtGuardIR s a b) := by
+  sorry
+
+/-- Operational Diamond Join Rewrite Soundness via `synthesizeStmtGuardIR`:
+    Given a downstream rewrite `GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂`,
+    conjoining `ctx` with the conjunction of branch edge guards guarantees `e₁` and `e₂`
+    evaluate to identical `Outcome`s after both `s₁` and `s₂`. -/
+theorem synthesizeStmtGuardIR_diamond_sound (s₁ s₂ : Stmt) (ctx req : GuardIR)
+    (e₁ e₂ : Expr) (h : GuardedEquiv (liftEval evalExpr) (denoteGuard req) e₁ e₂) :
+    let g := GuardIR.conj (synthesizeStmtGuardIR s₁ ctx req) (synthesizeStmtGuardIR s₂ ctx req)
+    ∀ env : Env, evalGuard env ctx = true → evalGuard env g = true →
+      evalExpr (execStmt s₁ env) e₁ = evalExpr (execStmt s₁ env) e₂ ∧
+        evalExpr (execStmt s₂ env) e₁ = evalExpr (execStmt s₂ env) e₂ := by
+  sorry
+
+/-- Non-Zero Literal Discharge: Synthesizing `.nonZero (.lit n)` across `.skip` from `.top`
+    normalizes to `.top` whenever `n ≠ 0`. -/
+theorem synthesizeStmtGuardIR_lit_nonZero (n : Int) (hn : n ≠ 0) :
+    synthesizeStmtGuardIR .skip .top (.nonZero (.lit n)) = .top := by
+  sorry
+
+/-- Assignment Pullback Self-Discharge: Across `v := rhs`, pre-context `.nonZero rhs`
+    discharges post-requirement `.nonZero (.var v)` to `.top`. -/
+theorem synthesizeStmtGuardIR_assign_self (v : VarId) (rhs : PureExpr) :
+    synthesizeStmtGuardIR (.assign v rhs) (.nonZero rhs) (.nonZero (.var v)) = .top := by
+  sorry
+
+/-- Diamond Safe-Divisor Discharge: Across `if x == 0 then d := n else d := x` with `n ≠ 0`,
+    post-requirement `.nonZero (.var d)` discharges unconditionally from `.top` to `.top`. -/
+theorem synthesizeStmtGuardIR_diamond_safe (x d : VarId) (n : Int) (hn : n ≠ 0) :
+    synthesizeStmtGuardIR
+      (.ite (.eq (.var x) (.lit 0)) (.assign d (.lit n)) (.assign d (.var x)))
+      .top (.nonZero (.var d)) = .top := by
+  sorry
+
+/-- Stage-Guarded Soundness of `optimizeBlock` via `GuardedEquiv` and `liftEval evalBlock`. -/
+theorem optimizeBlock_guardedEquiv (ctx : GuardIR) (prog : BlockProg) :
+    GuardedEquiv (liftEval evalBlock) (denoteGuard ctx) (optimizeBlock ctx prog) prog := by
+  sorry
+
+/-- Concrete Operational Soundness of `optimizeBlock`: Whenever `evalGuard env ctx = true`,
+    `optimizeBlock ctx prog` produces the exact same `Outcome` as `prog`. -/
+theorem optimizeBlock_sound (ctx : GuardIR) (prog : BlockProg) (env : Env) :
+    evalGuard env ctx = true → evalBlock env (optimizeBlock ctx prog) = evalBlock env prog := by
+  sorry
+
+/-- Parametric Non-Zero Literal Divisor Elimination: On `{ body := .skip, ret := mkDualDivExpr num y (.lit n) }`
+    with `n ≠ 0` under `.top`, `optimizeBlock` eliminates all checked divisions, cancels the algebraic
+    factor, introduces zero guard branches, and reduces block runtime check cost to `0`. -/
+theorem optimizeBlock_literal_div_elim_param (num y : PureExpr) (n : Int) (hn : n ≠ 0) (env : Env) :
+    let prog : BlockProg := { body := .skip, ret := mkDualDivExpr num y (.lit n) }
+    checkedDivCount (optimizeBlock .top prog).ret = 0 ∧
+      divOpCount (optimizeBlock .top prog).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock .top prog).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock .top prog) = 0 := by
+  sorry
+
+/-- Parametric Sequential Aliasing & Clobber Elimination: Under `.nonZero (.var x)` with `d ≠ x`,
+    across `d := x; x := 0`, `optimizeBlock` preserves `d ≠ 0` despite clobbering `x` and eliminates
+    all checked divisions on divisor `d` with zero runtime check cost. -/
+theorem optimizeBlock_seq_clobber_elim_param (x d : VarId) (hxd : d ≠ x)
+    (num y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+      divOpCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y d)) = 0 := by
+  sorry
+
+/-- Parametric Clobbered Divisor Trap Preservation: Under `.nonZero (.var x)`, across `d := x; x := 0`,
+    dividing by the clobbered variable `x` must still safely return `.trap` (never `.ub`). -/
+theorem optimizeBlock_clobber_trap_param (x d : VarId) (num y : PureExpr)
+    (env : Env) (hx : evalGuard env (.nonZero (.var x)) = true) :
+    evalBlock env (optimizeBlock (.nonZero (.var x)) (mkClobberBlock x d num y x)) = .trap := by
+  sorry
+
+/-- Parametric Diamond CFG Safe-Divisor Elimination: Under `.top` with `n ≠ 0`, across
+    `if x == 0 then d := n else d := x`, `optimizeBlock` proves `d ≠ 0` at the diamond join,
+    eliminates all terminal checked divisions and guard branches, and reduces total block
+    runtime check cost from `3` to `≤ 1`. -/
+theorem optimizeBlock_diamond_elim_param (x d : VarId) (n : Int) (hn : n ≠ 0)
+    (num y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      divOpCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret ≤ 1 ∧
+      guardBranchCount (optimizeBlock .top (mkDiamondSafeBlock x d n num y)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock .top (mkDiamondSafeBlock x d n num y)) ≤ 1 ∧
+      execBlockCheckCost env (mkDiamondSafeBlock x d n num y) = 3 := by
+  sorry
+
+/-- Parametric Dead-Branch Pruning & Guarded Cancellation: Under `.nonZero p` with `n ≠ 0`,
+    `optimizeBlock` prunes the unreachable zero-assignment branch in `mkDeadBranchBlock p d n y`,
+    propagates `d ≠ 0`, cancels `(y * d) / d`, and achieves `0` total block check cost. -/
+theorem optimizeBlock_dead_branch_elim_param (p : PureExpr) (d : VarId)
+    (n : Int) (hn : n ≠ 0) (y : PureExpr) (env : Env) :
+    checkedDivCount (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+      divOpCount (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)).ret = 0 ∧
+      execBlockCheckCost env (optimizeBlock (.nonZero p) (mkDeadBranchBlock p d n y)) = 0 := by
+  sorry
+
 end CatSem

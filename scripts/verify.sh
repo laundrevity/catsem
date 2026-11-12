@@ -189,19 +189,19 @@ fi
 
 echo "=== [6/6] Checking Gate 2 independent review sign-off ==="
 SUB_SHA=$(sha256_file "Proofs/Submission.lean")
-if [[ -f ../wt-codex/reviews/M1-postimpl.md ]]; then
-  cp ../wt-codex/reviews/M1-postimpl.md reviews/M1-postimpl.md
+if [[ -f ../wt-codex/reviews/M2-postimpl.md ]]; then
+  cp ../wt-codex/reviews/M2-postimpl.md reviews/M2-postimpl.md
 fi
 python3 - "$SUB_SHA" << 'PY'
 import pathlib, sys
 sub_sha = sys.argv[1]
-p = pathlib.Path("reviews/M1-postimpl.md")
+p = pathlib.Path("reviews/M2-postimpl.md")
 if not p.exists():
-    print("❌ FAIL: Missing reviews/M1-postimpl.md.")
+    print("❌ FAIL: Missing reviews/M2-postimpl.md.")
     sys.exit(1)
 txt = p.read_text(encoding="utf-8")
 if sub_sha not in txt or "STATUS: APPROVED" not in txt:
-    print(f"❌ FAIL: reviews/M1-postimpl.md lacks STATUS: APPROVED for SHA256 {sub_sha}.")
+    print(f"❌ FAIL: reviews/M2-postimpl.md lacks STATUS: APPROVED for SHA256 {sub_sha}.")
     sys.exit(1)
 print(f"✅ Gate 2 review sign-off verified for Submission SHA256 {sub_sha}.")
 PY
